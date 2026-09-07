@@ -513,7 +513,16 @@ record_exec_cell() {  # <id> <cell-json> <raw-dir> <safe>
       # to be a gap the owner accepted rather than one the recorder could not run, it is owed by
       # nobody, and on a host without PyYAML all 242 `mutation:` cells go that way at once — on both
       # binaries, agreeing, with nothing red anywhere. Exit 3 keeps the SKIP; anything else is FAIL.
+      # THE FIXTURE IS NAMED HERE, NOT LEFT TO A DEFAULT. boot-mutations.json is the PRODUCT'S
+      # inventory of boot mutations and lives in the data directory; apply-mutation.py used to
+      # default to a copy beside ITSELF, which the installed package does not ship, and this call
+      # site passed nothing — so every `mutation:` cell died with a FileNotFoundError traceback and
+      # went into the ledger as a FAIL about busbar (232 rows on a linux re-record against v0.2.0).
+      # Both ends now name the data dir, so the recorder and the tool cannot disagree about which
+      # inventory a cell was recorded against, and a missing fixture is one loud error rather than
+      # a plane of red cells.
       python3 "${here}/apply-mutation.py" --baseline "$WORK/config.yaml" --providers "$WORK/providers.yaml" \
+        --fixture "${data}/fixtures/boot-mutations.json" \
         --mutation "${cfg#mutation:}" --out "$xwork" >"$xwork/mutation.env" 2>"$xwork/mutation.err"
       local mut_rc=$?
       if [ "$mut_rc" = 3 ]; then
