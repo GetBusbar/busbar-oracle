@@ -506,9 +506,20 @@ mock_unit="$(python3 "${here}/mock-upstream.py" --selftest 2>&1)" && mock_unit_r
 # for the same reason, matches it exactly. hazard-no-data-dir.sh was the one driver in scripts/ that
 # did this (`fail 1 "busbar did not come up"`, `fail 2 "could not mint a key"`). This is a STATIC
 # guard, not a mutation case, because it has to hold for the next driver somebody writes too.
-sd="${here}/scripts"
+# THE CELL DRIVERS ARE THE PRODUCT'S, NOT THE TOOL'S. This read `${here}/scripts` — the oracle's own
+# directory — which held them back when the oracle lived inside busbar. Under the shim the tool ships
+# no scripts/ at all, so the glob matched nothing, `grep` printed "No such file or directory" for the
+# unexpanded pattern, `continue` swallowed it, and both this case and (x) below reported PASS over an
+# empty set. A guard on the count now, because a static case that can pass vacuously is worse than
+# no case: it reads green while proving that nothing was looked at.
+sd="${data}/scripts"
+sd_n=0
+for f in "$sd"/*.sh; do [ -f "$f" ] && sd_n=$((sd_n + 1)); done
+[ "$sd_n" -gt 0 ] \
+  || say FAIL "the data directory has no scripts/*.sh, so the two static driver guards below are looking at nothing and would report PASS over an empty set"
 missing_he=""
 for f in "$sd"/*.sh; do
+  [ -f "$f" ] || continue
   # does this driver ever call fail with a status other than -1? (`fail -1 …` is the named-gap shape)
   grep -Eq '(^|[^-[:alnum:]_])fail[[:space:]]+[0-9]' "$f" || continue
   grep -q 'harness_error' "$f" || missing_he="${missing_he} $(basename "$f")"
@@ -526,6 +537,7 @@ done
 # permanent, unforgivable-except-as-`breaking` divergence on a cell about nothing.
 clock_in_eff=""
 for f in "$sd"/*.sh; do
+  [ -f "$f" ] || continue
   grep -Eq '^[[:space:]]*step[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+"\$\((date|python3 -c .import time)' "$f" \
     && clock_in_eff="${clock_in_eff} $(basename "$f")"
 done

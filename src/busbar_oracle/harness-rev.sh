@@ -135,7 +135,17 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
   )
 }
 
-_hr_repo() { if [ -n "${BUSBAR_ORACLE_PRODUCT_ROOT:-}" ]; then printf '%s\n' "$BUSBAR_ORACLE_PRODUCT_ROOT"; else (cd "$_hr_here/../.." && pwd); fi; }
+# THE ROOT IS RESOLVED THE SAME WAY THE FILES ARE, OR THE PREFIX-STRIP SILENTLY DOES NOTHING.
+# Every path in the set below is canonicalized (`cd "$(dirname …)" && pwd`) before its repo-relative
+# name is taken, so the root it is measured against has to be canonical too. It was not: the
+# environment's value was printed verbatim. Anywhere the product root reaches through a symlink —
+# macOS `/tmp` -> `/private/tmp`, `$TMPDIR` under `/var` -> `/private/var`, a checkout under a
+# symlinked home — `sed "s|^${repo}/||"` then matched nothing, the ABSOLUTE path was hashed instead
+# of the relative name, and the revision became a function of where the tree happened to sit. Two
+# byte-identical trees at two paths hashed differently, which is the one thing this file must not do:
+# a golden restored from a cache into a different directory would look like a harness change, and the
+# skew guard would refuse a comparison that was never skewed.
+_hr_repo() { if [ -n "${BUSBAR_ORACLE_PRODUCT_ROOT:-}" ]; then (cd "$BUSBAR_ORACLE_PRODUCT_ROOT" && pwd); else (cd "$_hr_here/../.." && pwd); fi; }
 
 harness_rev_files() {  # the same set, as repo-relative paths (ci.yml's cache key, land.sh, humans)
   local repo; repo="$(_hr_repo)" || return 1
