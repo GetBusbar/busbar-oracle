@@ -96,6 +96,18 @@ import tempfile
 # (skewable with a flag and a note) rather than fatal.
 IDENTITY = ("version", "binary_sha256")
 
+# THE TWO LOCATIONS, RESOLVED THE SAME WAY EVERY OTHER DRIVER RESOLVES THEM. Both used to be
+# derived from THIS FILE's directory — `--cells` as `<tool>/cells.json`, and the `<repo>` token
+# `_tokenize_binary_path` strips as `<tool>/../..`. That derivation was only ever right while the
+# tool lived inside the product; an installed tool ships no cells.json, and `<tool>/../..` is
+# site-packages. So a merge run through `busbar-oracle merge` wrote a merged ledger it could not
+# order (missing cells.json) and left absolute machine paths in a COMMITTED meta.json, which is the
+# one thing _tokenize_binary_path exists to prevent.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("BUSBAR_ORACLE_DATA") or _HERE
+PRODUCT_ROOT = os.environ.get("BUSBAR_ORACLE_PRODUCT_ROOT") or os.path.abspath(
+    os.path.join(_HERE, "..", ".."))
+
 # ── THE PINNED-BINARY IDENTITY ──────────────────────────────────────────────────────────────────
 # `binary_sha256` equality is the right rule for parts of one recording made on one machine, and the
 # wrong rule for the case that actually arises: a release is published as one binary PER TRIPLE, and
@@ -182,7 +194,7 @@ def machine_independent_binary(path: str) -> str:
     """
     if not isinstance(path, str) or not path.startswith("/"):
         return path
-    repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+    repo = PRODUCT_ROOT
     home = os.environ.get("HOME") or "/nonexistent"
     cache = os.environ.get("BUSBAR_ORACLE_CACHE") or os.path.join(home, ".cache", "busbar-oracle")
     for root, token in ((repo, "<repo>"), (cache, "<oracle-cache>"), (home, "<home>")):
@@ -611,8 +623,9 @@ def main() -> int:
                          "digest in no row is still refused.")
     ap.add_argument("--note", default="",
                     help="prepended to the merged meta.json's harness_rev_note/host_triple_note; required for a skewed merge")
-    ap.add_argument("--cells", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cells.json"),
-                    help="cells.json whose order the merged ledger is written in (record.sh's own order)")
+    ap.add_argument("--cells", default=os.path.join(DATA, "cells.json"),
+                    help="cells.json whose order the merged ledger is written in (record.sh's own "
+                         "order). Default: $BUSBAR_ORACLE_DATA/cells.json")
     ap.add_argument("--selftest", action="store_true", help="prove the provenance rule, then exit")
     ap.add_argument("parts", nargs="*")
     a = ap.parse_args()
