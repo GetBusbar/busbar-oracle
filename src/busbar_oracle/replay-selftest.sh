@@ -1385,29 +1385,83 @@ fi
 
 # (jj-3) THE DRIVER CONTRACT: BUSBAR_ORACLE_TOOL_DIR. The product's cell drivers call TOOL files
 # (capture.py, capture-exec.py, mock-upstream.py, oracle-config.sh, fetch-plugin.sh, fetch-golden.sh)
-# that left the product's tree with the tool. They reach them through this variable. The product's
-# shim exports it; the tool must export it too, or a driver run by `busbar-oracle record` directly
-# falls back to a path beside itself — which is either absent (a broken cell) or a stale in-tree copy
-# (a cell recorded by code nobody pinned). Observed by TRAPPING THE EXIT of a real `source` of each
-# driver, so this reads the value the driver actually exports rather than a line of its text.
+# that left the product's tree with the tool. They reach them through this variable.
 #
-# THE DRIVER'S OWN $0, OR THIS MEASURES NOTHING. Every driver derives `here` from `dirname "$0"`, so
-# a `bash -c '. "$1"' _ <driver>` reads $0 as `_` and the driver locates itself at the CURRENT
-# DIRECTORY — the value that came back was the repository root and the case failed against a
-# correctly-exporting driver. `bash -c <cmd> <name>` sets $0 to <name>, which is exactly the hook
-# needed: the driver sees its real path, sets `here`, exports, and then exits 2 on its own usage
-# check with no arguments — at which point the EXIT trap reports what it exported.
-exported_tool_dir_of() {  # <driver.sh> -> the BUSBAR_ORACLE_TOOL_DIR it exports, or <unset>
-  env -u BUSBAR_ORACLE_TOOL_DIR bash -c '
-    trap '"'"'printf "%s\n" "${BUSBAR_ORACLE_TOOL_DIR:-<unset>}" >&9'"'"' EXIT
-    . "$0"
-  ' "$1" 9>&1 >/dev/null 2>&1
+# THE CLAIM IS ABOUT THE VALUE THE DRIVER ENDS UP WITH, NOT ABOUT WHO SET IT. Two callers exist and
+# both are legitimate:
+#   * the PRODUCT'S SHIM, which exports the variable itself (it knows where it installed the tool)
+#     and then execs `busbar-oracle`. The driver must LEAVE THAT ALONE — the export below is
+#     `${VAR:-…}`, a default and not an override, for the same reason BUSBAR_ORACLE_DATA is: the
+#     harness-rev cases further up re-root the tool at a throwaway copy of the data, which an
+#     overriding driver would make impossible.
+#   * `busbar-oracle record` run DIRECTLY, with nothing pre-set. Then the driver must supply its own
+#     directory, or the cell driver it runs falls back to `:-$here` — a path beside itself, which is
+#     either absent (a broken cell) or a stale in-tree copy (a cell recorded by code nobody pinned).
+# Both arms are asserted below. Asserting only the second described a tool that is correct and a
+# shim that is not.
+#
+# HOW IT IS OBSERVED, AND WHY NOT WITH AN EXIT TRAP ALONE. This has been wrong twice, both times by
+# measuring the probe instead of the driver, so the mechanism is spelled out:
+#
+#   1. THE DRIVER'S OWN $0. Every driver derives `here` from `dirname "$0"`, so a
+#      `bash -c '. "$1"' _ <driver>` reads $0 as `_` and the driver locates itself at the CURRENT
+#      DIRECTORY. `bash -c <cmd> <name>` sets $0 to <name>, which is the hook needed: the driver
+#      sees its real path, sets `here`, exports, and then exits 2 on its own usage check.
+#   2. NOT AN `EXIT` TRAP ALONE. record.sh sources the PRODUCT's ledger machinery
+#      (`$BUSBAR_ORACLE_PRODUCT_ROOT/testing/fleet-fixtures/lib.sh`) three lines after the export,
+#      and a product's copy installs its own cleanup trap — busbar's line 81 is
+#      `trap _reap_fixtures EXIT`, which REPLACES the probe's. The probe then produced no output at
+#      all, the empty string was read as the exported value, and `./bin/oracle replay-selftest`
+#      inside busbar reported RED against a tool that was exporting the right path. Note the shape:
+#      the probe worked in this repository, where no product root exists and the `source` fails
+#      harmlessly, and broke in the only place the case is about.
+#      So `exit` is overridden as a FUNCTION as well. A trap can be replaced by the product; a
+#      function of that name cannot be, short of the product defining one too, and the two
+#      mechanisms fail independently. Whichever fires first is the answer.
+#   3. AN OBSERVATION THAT DID NOT HAPPEN IS NOT A VALUE. `<no-observation>` is distinct from
+#      `<unset>` and from a wrong path, and it reads as "this case did not run" rather than as a
+#      verdict about the driver — which is precisely the confusion that cost the round above.
+#
+# The probe runs against a STAND-IN PRODUCT ROOT that installs an EXIT trap of its own, so the
+# clobber is reproduced here, in this repository, on every run — rather than only in a product
+# nobody has checked out.
+td_root="$W/tdroot"
+mkdir -p "$td_root/testing/fleet-fixtures"
+cat >"$td_root/testing/fleet-fixtures/lib.sh" <<'LIB'
+# Stand-in for a product's ledger machinery, in the ONE respect that broke the probe: it installs an
+# EXIT trap, exactly as busbar's testing/fleet-fixtures/lib.sh does (`trap _reap_fixtures EXIT`).
+# record.sh sources this three lines after the export under test.
+_probe_product_reap() { :; }
+trap _probe_product_reap EXIT
+LIB
+td_probe='
+_probe_say() { printf "%s\n" "${BUSBAR_ORACLE_TOOL_DIR:-<unset>}" >&9; }
+exit() { _probe_say; builtin exit "$@"; }
+trap _probe_say EXIT
+. "$0"
+'
+tool_dir_after() {  # <driver.sh> [preset] -> the value the driver ends up with
+  local drv="$1" out
+  if [ "$#" -ge 2 ]; then
+    out="$(BUSBAR_ORACLE_TOOL_DIR="$2" BUSBAR_ORACLE_PRODUCT_ROOT="$td_root" \
+      bash -c "$td_probe" "$drv" 9>&1 >/dev/null 2>&1 | head -1)"
+  else
+    out="$(env -u BUSBAR_ORACLE_TOOL_DIR BUSBAR_ORACLE_PRODUCT_ROOT="$td_root" \
+      bash -c "$td_probe" "$drv" 9>&1 >/dev/null 2>&1 | head -1)"
+  fi
+  printf '%s\n' "${out:-<no-observation>}"
 }
+td_preset="$W/a-shim-said-so"
 for drv in record.sh replay.sh; do
-  got_td="$(exported_tool_dir_of "${here}/${drv}" | tail -1)"
+  got_td="$(tool_dir_after "${here}/${drv}")"
   [ "$got_td" = "$here" ] \
-    && say PASS "${drv} exports BUSBAR_ORACLE_TOOL_DIR=<the installed tool>, so a driver it runs finds the tool's files" \
-    || say FAIL "${drv} exports BUSBAR_ORACLE_TOOL_DIR=${got_td} (wanted ${here}) — a cell driver invoked by the tool directly cannot resolve capture.py/mock-upstream.py/fetch-plugin.sh"
+    && say PASS "${drv}: with nothing pre-set, a driver it runs sees BUSBAR_ORACLE_TOOL_DIR=<the installed tool>" \
+    || say FAIL "${drv}: with nothing pre-set, a driver it runs sees BUSBAR_ORACLE_TOOL_DIR=${got_td} (wanted ${here}) — it cannot resolve capture.py/mock-upstream.py/fetch-plugin.sh"
+
+  got_td="$(tool_dir_after "${here}/${drv}" "$td_preset")"
+  [ "$got_td" = "$td_preset" ] \
+    && say PASS "${drv}: a value the caller pre-exported (what the product's shim does) survives untouched" \
+    || say FAIL "${drv}: a pre-exported BUSBAR_ORACLE_TOOL_DIR became ${got_td} (wanted ${td_preset}) — the driver is overriding its caller, and a shim that installed the tool cannot say where"
 done
 
 # …and the two halves of the contract are not the same half. A probe that reads a tool file THROUGH
