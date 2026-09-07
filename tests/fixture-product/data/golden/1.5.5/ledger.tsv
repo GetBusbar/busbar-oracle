@@ -1,0 +1,2 @@
+cli|--version	PASS	exit 0; busbar 0.0.0-fixture	
+http|chat|ok	PASS	HTTP 200; total_tokens 2	

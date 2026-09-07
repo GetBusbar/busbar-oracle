@@ -1,0 +1,7 @@
+{
+  "_comment": "The plugin manifest the fixture product's store-fixture-a 'plugin' ships. It is not loaded by anything; it exists so plugin-digests.tsv pins the sha256 of a file that is actually here, and so the harness revision's fixtures/*.json glob has something to hash.",
+  "alias": "fixture-a",
+  "kind": "store",
+  "abi": "0.0.0-fixture",
+  "settings_schema": {"url": "string"}
+}

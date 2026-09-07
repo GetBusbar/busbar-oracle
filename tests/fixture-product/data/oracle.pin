@@ -1,0 +1,14 @@
+# The oracle TOOL this fixture product is judged by.
+#
+# A real product names a published tag and the sha256 of that tag's archive here, and its shim
+# refuses to run a tool whose bytes do not hash to it. The fixture product is judged by the tool it
+# lives inside, which has no released archive to hash while it is being developed -- so the digest
+# below is all zeros, and it is honest about that: nothing fetches it, and every self-test that
+# needs a pin to MOVE supplies its own through BUSBAR_ORACLE_TOOL_DIGEST.
+#
+# What this file still proves, and the reason it is here rather than absent: harness-rev.sh hashes
+# it by name and by bytes, so the fixture product has a pin that a self-test can bump and watch the
+# harness revision move. An absent pin and an empty pin must not produce the same revision, and this
+# is the file that lets that be tested without a real release.
+tag=v0.0.0-fixture
+sha256=0000000000000000000000000000000000000000000000000000000000000000

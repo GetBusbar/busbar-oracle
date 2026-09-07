@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "The FIXTURE PRODUCT'S cell corpus. Four cells, chosen so that every self-test the oracle runs",
+    "over a product's data has something real to look at and nothing it has to pretend about:",
+    "  cli|--version          a script cell, the cheapest thing busbar-stub can be asked",
+    "  http|chat|ok           an http cell, one non-streaming completion through the stub",
+    "  plugins.store-persist|store-fixture-a   env-gated store cells, so fixture-gate-selftest's",
+    "  plugins.store-persist|store-fixture-b   case (f) has a non-empty set to cross-check against",
+    "                                          scripts/store-persist.sh's own case arms",
+    "NO `mock_control` AND NO `compare` ANYWHERE, DELIBERATELY. Both are waivers, and a fixture that",
+    "carries one is a fixture that teaches the shape of a waiver to whoever copies it next. The",
+    "guards that police them (mock-upstream.py --check-controls, diff-cells' compare policy) are",
+    "proven against the real corpus in busbar's tree; here they only have to have nothing to refuse.",
+    "The ids are deliberately unlike the ones in the tool's own fixtures/selftest-recording, so a",
+    "diff-cells run that loads THIS corpus against THAT recording owes nothing and compares nothing."
+  ],
+  "counts": {"total": 4},
+  "cells": [
+    {
+      "id": "cli|--version",
+      "plane": "core",
+      "family": "cli",
+      "driver": "script",
+      "script": {"name": "cli-version.sh", "args": []},
+      "outcome": "ok",
+      "why": "the binary names itself; a product that cannot answer this cannot be recorded at all"
+    },
+    {
+      "id": "http|chat|ok",
+      "plane": "llm",
+      "family": "http",
+      "driver": "http",
+      "outcome": "ok",
+      "why": "one non-streaming completion, the cheapest cell that still crosses the listener"
+    },
+    {
+      "id": "plugins.store-persist|store-fixture-a",
+      "plane": "core",
+      "family": "plugins",
+      "driver": "script",
+      "script": {"name": "store-persist.sh", "args": ["store-fixture-a"]},
+      "outcome": "ok",
+      "why": "a network-backed store: recorded only when its backend URL is in the environment",
+      "needs_fixture": "FIXTURE_STORE_A_URL"
+    },
+    {
+      "id": "plugins.store-persist|store-fixture-b",
+      "plane": "core",
+      "family": "plugins",
+      "driver": "script",
+      "script": {"name": "store-persist.sh", "args": ["store-fixture-b"]},
+      "outcome": "ok",
+      "why": "a second backend, so case (f) proves the two maps agree id-for-id and not merely once",
+      "needs_fixture": "FIXTURE_STORE_B_URL"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "_comment": "The fixture product's golden recording. Two cells, recorded by busbar-stub, kept so replay-selftest's owed-ratchet case has a real ledger to read instead of skipping silently. It is a FIXTURE: it is written by hand and is never re-recorded by a machine, so no digest here refers to a released artefact.",
+  "binary": "tests/fixture-product/busbar-stub",
+  "version": "busbar 0.0.0-fixture",
+  "recorded": 2,
+  "harness_rev": "0000000000000000000000000000000000000000000000000000000000000000",
+  "host": "fixture"
+}

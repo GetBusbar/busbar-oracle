@@ -1,0 +1,10 @@
+# plugin	tag	asset	sha256
+# The plugin artefacts the fixture product's store cells load. There are no real ones: the two
+# "plugins" below are the manifests under fixtures/, and the digests are the sha256 of those files.
+# The rows exist so this map has more than one entry and so selftest.sh's walk over it cannot pass
+# by walking nothing -- a pin file whose every row is a placeholder proves less than no pin file.
+#
+# To re-pin after editing a manifest:
+#   shasum -a 256 tests/fixture-product/data/fixtures/store-fixture-*.json
+store-fixture-a	v0.0.0-fixture	store-fixture-a.json	827125bb687e645fc442b54185e6f33b0e324148ce81b204a68155b3b07646fd
+store-fixture-b	v0.0.0-fixture	store-fixture-b.json	0234edb3ba630c77f7454c0fb2637fc7bf543ee97bae1bb9f24d6a68e98c1453

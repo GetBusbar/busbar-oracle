@@ -1,0 +1,10 @@
+# version	asset	sha256
+# The binaries the fixture product's golden may have been recorded by. A real product pins the
+# sha256 of a PUBLISHED release asset here and fetch-golden.sh refuses any download that does not
+# match; the fixture product publishes nothing, so the one row below pins the bytes of the stub
+# binary that lives beside this directory. That is not a weaker pin -- it is the same pin over a
+# nearer artefact, and tests/fixture-product/selftest.sh verifies it by hashing the file.
+#
+# To re-pin after editing busbar-stub:
+#   shasum -a 256 tests/fixture-product/busbar-stub
+0.0.0-fixture	busbar-stub	d70c5ade4f45d4ef6fe37424aac43a5b4b8007b5ec56a344bb101a00804568ff

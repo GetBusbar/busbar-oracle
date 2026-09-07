@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "The register of divergences the differ FORGIVES, for the fixture product. EMPTY, and it must",
+    "stay empty: an accepted difference is a statement that a real product changed behaviour and",
+    "somebody signed for it. The fixture product has no behaviour to change and nobody to sign.",
+    "It is here because it decides a verdict on identical bytes, which is why harness-rev.sh hashes",
+    "it and why replay-selftest.sh loads it against cells.json -- an empty register that LOADS is",
+    "the fact those two cases need."
+  ],
+  "accepted": []
+}

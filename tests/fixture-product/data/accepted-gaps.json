@@ -1,0 +1,9 @@
+{
+  "_comment": [
+    "Ids from owed-baseline.txt that the current golden no longer owes, named with an owner and a",
+    "rationale so the loss is a decision rather than silence. Empty: the fixture golden owes exactly",
+    "what the baseline names, and if that ever stops being true the fix is to correct the fixture,",
+    "never to write a waiver here."
+  ],
+  "accepted": []
+}

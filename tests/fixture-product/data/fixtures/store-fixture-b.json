@@ -1,0 +1,7 @@
+{
+  "_comment": "The second store 'plugin' manifest. Two of them, not one, so plugin-digests.tsv is a map with more than one entry and a selftest that walks it cannot pass by walking nothing.",
+  "alias": "fixture-b",
+  "kind": "store",
+  "abi": "0.0.0-fixture",
+  "settings_schema": {"url": "string"}
+}
