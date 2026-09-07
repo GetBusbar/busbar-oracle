@@ -1,0 +1,38 @@
+# The oracle's development dependencies, pinned by version AND by digest.
+#
+# The oracle decides whether somebody shipped a regression, so its own CI is the boring kind: a
+# linter that could change between two runs is one more way a verdict about a product could be a
+# verdict about the machine. `pip install --require-hashes -r requirements-dev.txt` refuses to
+# install anything whose bytes are not named here, and refuses the whole file if any requirement
+# lacks a hash -- so a dependency added without one fails loudly rather than floating.
+#
+# Every published wheel for the version is listed, not only the one this laptop happens to need:
+# pip picks the file matching the platform it is running on, and CI (ubuntu x86_64), a maintainer on
+# an arm64 Mac and a contributor on Windows must all be held to the same pin. The sdist is here for
+# a platform with no wheel.
+#
+# Digests are PyPI's own, from https://pypi.org/pypi/ruff/0.8.4/json. To move the pin:
+#   curl -sS https://pypi.org/pypi/ruff/<version>/json \
+#     | python3 -c 'import json,sys; [print(f["filename"], f["digests"]["sha256"]) for f in json.load(sys.stdin)["urls"]]'
+#
+# There are no RUNTIME dependencies and there must not be: the oracle has to be able to judge a
+# workspace without sharing anything with it. See pyproject.toml's `dependencies = []`.
+ruff==0.8.4 \
+    --hash=sha256:58072f0c06080276804c6a4e21a9045a706584a958e644353603d36ca1eb8a60 \
+    --hash=sha256:ffb60904651c00a1e0b8df594591770018a0f04587f7deeb3838344fe3adabac \
+    --hash=sha256:6ddf5d654ac0d44389f6bf05cee4caeefc3132a64b58ea46738111d687352296 \
+    --hash=sha256:e248b1f0fa2749edd3350a2a342b67b43a2627434c059a063418e3d375cfe643 \
+    --hash=sha256:bf197b98ed86e417412ee3b6c893f44c8864f816451441483253d5ff22c0e81e \
+    --hash=sha256:c41319b85faa3aadd4d30cb1cffdd9ac6b89704ff79f7664b853785b48eccdf3 \
+    --hash=sha256:e4e56b3baa9c23d324ead112a4fdf20db9a3f8f29eeabff1355114dd96014604 \
+    --hash=sha256:9f8402b7c4f96463f135e936d9ab77b65711fcd5d72e5d67597b543bbb43cf3f \
+    --hash=sha256:736272574e97157f7edbbb43b1d046125fce9e7d8d583d5d65d0c9bf2c15addf \
+    --hash=sha256:e5fe710ab6061592521f902fca7ebcb9fabd27bc7c57c764298b1c1f15fff720 \
+    --hash=sha256:13e9ec6d6b55f6da412d59953d65d66e760d583dd3c1c72bf1f26435b5bfdbae \
+    --hash=sha256:97d9aefef725348ad77d6db98b726cfdb075a40b936c7984088804dfd38268a7 \
+    --hash=sha256:ab78e33325a6f5374e04c2ab924a3367d69a0da36f8c9cb6b894a62017506111 \
+    --hash=sha256:8ef06f66f4a05c3ddbc9121a8b0cecccd92c5bf3dd43b5472ffe40b8ca10f0f8 \
+    --hash=sha256:552fb6d861320958ca5e15f28b20a3d071aa83b93caee33a87b471f99a6c0835 \
+    --hash=sha256:f21a1143776f8656d7f364bd264a9d60f01b7f52243fbe90e7670c0dfe0cf65d \
+    --hash=sha256:9183dd615d8df50defa8b1d9a074053891ba39025cf5ae88e8bcb52edcc4bf08 \
+    --hash=sha256:0d5f89f254836799af1615798caa5f80b7f935d7a670fad66c5007928e57ace8

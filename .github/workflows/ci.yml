@@ -25,8 +25,13 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
+      # NO FALLBACK. This was `--require-hashes -r requirements-dev.txt || pip install "ruff==0.8.4"`
+      # against a requirements-dev.txt that did not exist, so the pinned path failed on every run and
+      # the unpinned one always took over -- the digest pin was decorative, and would have stayed
+      # decorative on the day it started mattering. The file exists now, and an install that cannot
+      # satisfy it is a red job rather than a quiet downgrade.
       - name: install ruff
-        run: pip install --require-hashes -r requirements-dev.txt || pip install "ruff==0.8.4"
+        run: pip install --require-hashes -r requirements-dev.txt
       - name: ruff check
         run: ruff check .
       - name: ruff format --check
