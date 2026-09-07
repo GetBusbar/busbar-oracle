@@ -638,53 +638,149 @@ else
   say FAIL "the ORDER_RULES/CONTENT_RULES guard does not forbid exempting a content-dropping rule: $(tail -2 "$W/order-assert.log")"
 fi
 
-# (ab) THE HARNESS REVISION MUST COVER EVERY FILE THAT DECIDES A VERDICT, not only every file that
-# decides a RECORDING. harness-rev.sh's own header says the set is "the files that decide what gets
-# recorded AND HOW IT IS COMPARED", and it is on that ground that accepted-differences.json and
-# owed-baseline.txt are in it — neither is executed while recording; both change the verdict on
-# identical bytes. By exactly that argument four more belong and were absent:
+# (ab) THE HARNESS REVISION IS A PINNED JUDGE PLUS THE PRODUCT'S OWN EVIDENCE — AND NOTHING ELSE.
 #
-#   replay.sh          the comparison DRIVER. It holds the owed-baseline regression check, the
-#                      golden-binary provenance gate and the --allow-harness-skew plumbing; edit it
-#                      and the same two recordings get a different verdict.
-#   fleet-fixtures/verdict.sh
-#                      its own header: "This is the ONLY place the gate decides anything." lib.sh is
-#                      already in the set for writing the ledger ROW; the file that turns those rows
-#                      into red or green was not.
-#   accepted-gaps.json the register that forgives an owed-baseline regression, with an owner and a
-#                      rationale — the exact shape of accepted-differences.json, which is in the set.
-#   harness-rev.sh     the definition of the set. Removing a file from the list moves the hash only
-#                      because that file's bytes leave it; changing how the list is HASHED does not.
+# These cases used to assert the opposite, and were right to, under a layout that no longer exists.
+# When the oracle lived inside busbar, the files that decide a recording and the files that decide a
+# verdict sat in one directory, so hashing the directory hashed both. The rule was "the rev covers
+# every file that decides a recording OR a verdict", and the proof was: edit replay.sh, edit
+# renormalize.sh, edit fleet-fixtures/lib.sh — the rev must move.
 #
-# A file outside the set can change while the rev sits still, and diff-cells' skew guard — whose
-# whole job is to refuse a pair of recordings made under different harnesses — then compares two
-# equal stamps and says nothing. Checked by NAME against `harness-rev.sh --files`, so this is red the
-# day one is dropped rather than the day a verdict is doubted.
+# The oracle is a separate product now. The judge ships on its own release cadence and the product
+# PINS it: testing/shadow-oracle/oracle.pin names a tag and the sha256 of that tag's archive, the
+# product's shim refuses a tool whose bytes do not hash to the pin, and harness-rev.sh folds the pin
+# into the revision instead of hashing the judge's files. So the model the old cases proved is not
+# merely stale — asserting it now would be asserting a bug:
+#
+#   * The judge's files are NOT in the set as bytes. If they were, a tool upgrade would move the rev
+#     twice by two different routes, and — worse — a judge running from a tree that does not match
+#     the product's committed pin would still produce a rev that looked settled. One statement of
+#     which judge ran, or none.
+#   * The pin IS in the set, as a file with a name (oracle.pin) and as the digest of the tool that
+#     actually ran ($BUSBAR_ORACLE_TOOL_DIGEST). A pin bump is therefore a data change: visible to
+#     `--files`, to a `git diff`, and to the hash.
+#   * The product's DATA is still in the set exactly as before. accepted-differences.json and
+#     owed-baseline.txt are neither executed while recording nor shipped by the tool, and both change
+#     the verdict on identical bytes; that argument never depended on where the judge lived.
+#
+# What follows proves the new model in four parts: the data is covered by name, the judge is not,
+# the pin moves the rev, and editing the judge does not.
 #
 # rigs-baseline.json is deliberately NOT required here: it is the sign-off floor of the SEPARATE
 # plane-rigs gate (rigs-ledger.sh), which has its own verdict and never touches an LLM-plane
 # recording or this replay.
-hr_files="$(bash "${here}/harness-rev.sh" --files)"
+hr_dp="$(cd "${data}/.." && pwd)"
+hr_pin="v0.0.0-selftest@0000000000000000000000000000000000000000000000000000000000000000"
+hr_files_of() {  # hr_files_of <data-dir> <product-root> -> the set, repo-relative, under a pin
+  BUSBAR_ORACLE_DATA="$1" BUSBAR_ORACLE_PRODUCT_ROOT="$2" BUSBAR_ORACLE_TOOL_DIGEST="${3:-$hr_pin}" \
+    bash "${4:-$here}/harness-rev.sh" --files
+}
+hr_rev_of() {  # hr_rev_of <data-dir> <product-root> [pin] [tool-dir] -> the revision
+  BUSBAR_ORACLE_DATA="$1" BUSBAR_ORACLE_PRODUCT_ROOT="$2" BUSBAR_ORACLE_TOOL_DIGEST="${3:-$hr_pin}" \
+    bash "${4:-$here}/harness-rev.sh" | awk '{print $2}'
+}
+# The cell drivers under scripts/ are data and are in the set; they are excluded from the name scans
+# below only so that a driver called replay.sh could never be mistaken for the judge's replay.sh.
+hr_top="$(hr_files_of "$data" "$hr_dp" | grep -v '/scripts/' | while IFS= read -r f; do basename "$f"; done)"
+
+# (ab-1) THE PRODUCT'S EVIDENCE IS COVERED BY NAME. Checked against `harness-rev.sh --files` rather
+# than against the hash, so this is red the day a file is dropped from the list rather than the day
+# a verdict is doubted. oracle.pin is in this list for the reason the other six are: it decides the
+# verdict on identical bytes, by deciding who reads them.
 hr_missing=""
-for want in testing/shadow-oracle/replay.sh testing/shadow-oracle/harness-rev.sh \
-            testing/shadow-oracle/accepted-gaps.json testing/fleet-fixtures/verdict.sh; do
-  printf '%s\n' "$hr_files" | grep -Fqx "$want" || hr_missing="${hr_missing} ${want}"
+for want in cells.json accepted-differences.json accepted-gaps.json owed-baseline.txt \
+            golden-digests.tsv plugin-digests.tsv oracle.pin; do
+  printf '%s\n' "$hr_top" | grep -Fqx "$want" || hr_missing="${hr_missing} ${want}"
 done
 [ -z "$hr_missing" ] \
-  && say PASS "the harness revision covers the comparison driver, the verdict, the gap register and its own definition" \
+  && say PASS "the harness revision covers the register, the floor, the gap list, the digest pins and the tool pin" \
   || say FAIL "file(s) that decide a verdict are OUTSIDE the harness revision, so they can change while the rev sits still and the skew guard stays quiet:${hr_missing}"
-# …and the rev genuinely MOVES when one of them does — a name in the list that is never hashed
-# would pass the check above and prove nothing.
-hr_before="$(bash "${here}/harness-rev.sh" | awk '{print $2}')"
-cp "${here}/replay.sh" "$W/replay.sh.bak"
-printf '\n# harness-rev selftest probe\n' >>"${here}/replay.sh"
-hr_after="$(bash "${here}/harness-rev.sh" | awk '{print $2}')"
-cp "$W/replay.sh.bak" "${here}/replay.sh"
-hr_restored="$(bash "${here}/harness-rev.sh" | awk '{print $2}')"
-if [ "$hr_before" != "$hr_after" ] && [ "$hr_before" = "$hr_restored" ]; then
-  say PASS "editing the comparison driver MOVES the harness revision (and restoring it moves it back)"
+
+# (ab-2) …AND THE JUDGE IS NOT IN IT AS BYTES. The pin stands in for every one of these. A file
+# here would mean the product hashes its judge twice — once as the tool it pinned and once as the
+# tree it happened to be running from — and those two can disagree.
+hr_intruder=""
+for nope in replay.sh harness-rev.sh renormalize.sh record.sh oracle-config.sh \
+            verdict.sh lib.sh normalize.py diff-cells.py merge-recordings.py; do
+  printf '%s\n' "$hr_top" | grep -Fqx "$nope" && hr_intruder="${hr_intruder} ${nope}"
+done
+[ -z "$hr_intruder" ] \
+  && say PASS "the judge's own files are outside the harness revision — the pin is how the tool enters it" \
+  || say FAIL "the judge is hashed as BYTES as well as pinned as a DIGEST, so a tool running from a tree that does not match the product's pin still stamps a settled-looking revision:${hr_intruder}"
+
+# (ab-3) THE PIN MOVES THE REVISION. This is the whole of the tool half now: if a different pinned
+# judge produced the same rev, the skew guard would happily compare a recording made by v0.1.0
+# against one made by v0.9.0 and find nothing to say.
+hr_p1="$(hr_rev_of "$data" "$hr_dp" "v0.1.0@1111111111111111111111111111111111111111111111111111111111111111")"
+hr_p2="$(hr_rev_of "$data" "$hr_dp" "v0.2.0@2222222222222222222222222222222222222222222222222222222222222222")"
+hr_p3="$(hr_rev_of "$data" "$hr_dp" "v0.1.0@1111111111111111111111111111111111111111111111111111111111111111")"
+if [ -n "$hr_p1" ] && [ "$hr_p1" != "$hr_p2" ] && [ "$hr_p1" = "$hr_p3" ]; then
+  say PASS "a different pinned judge is a different harness revision (and the same pin is the same one)"
 else
-  say FAIL "editing replay.sh did not move the harness revision (before=${hr_before:0:12} after=${hr_after:0:12} restored=${hr_restored:0:12})"
+  say FAIL "the pinned tool digest does not move the harness revision (v0.1.0=${hr_p1:0:12} v0.2.0=${hr_p2:0:12} again=${hr_p3:0:12}) — two judges would stamp one revision"
+fi
+
+# (ab-4) …AND EDITING THE JUDGE DOES NOT. The inverse of the old case, and the reason it is safe to
+# state it: the pin is a digest of the tool's ARCHIVE, so any edit to any of these files is already
+# a different tool that the product's shim would refuse to run under the old pin. Hashing them here
+# as well would be a second, weaker copy of that fact.
+#
+# Mutated over a COPY of the tool, never the installed tree. The case this replaces appended to
+# ${here}/replay.sh in place and restored it from a backup with no trap — an interrupted run left
+# the installation corrupt, and a read-only install (system site-packages, a container layer, a Nix
+# store path) failed outright.
+hrtool="$W/hrtool"
+cp -R "${here}" "$hrtool"
+hr_t0="$(hr_rev_of "$data" "$hr_dp" "$hr_pin" "$hrtool")"
+hr_tool_moved=""
+hr_tool_seen=0
+for tf in replay.sh harness-rev.sh renormalize.sh record.sh fleet_fixtures/verdict.sh fleet_fixtures/lib.sh; do
+  [ -f "$hrtool/$tf" ] || continue
+  hr_tool_seen=$((hr_tool_seen + 1))
+  printf '\n# harness-rev selftest probe\n' >>"$hrtool/$tf"
+  [ "$(hr_rev_of "$data" "$hr_dp" "$hr_pin" "$hrtool")" = "$hr_t0" ] || hr_tool_moved="${hr_tool_moved} ${tf}"
+  cp "${here}/$tf" "$hrtool/$tf"
+done
+if [ -z "$hr_t0" ] || [ "$hr_tool_seen" -lt 5 ]; then
+  say FAIL "the judge-edit case found only ${hr_tool_seen} of the tool's own files to edit (rev=${hr_t0:0:12}) — it is proving nothing"
+elif [ -z "$hr_tool_moved" ]; then
+  say PASS "editing the judge's own files does not move the harness revision — the pin does (${hr_tool_seen} files)"
+else
+  say FAIL "editing the judge moved the harness revision by bytes as well as by pin, so one tool upgrade moves it twice and a tree that disagrees with the pin is still stamped:${hr_tool_moved}"
+fi
+
+# (ab-5) THE REVISION FOLLOWS THE DATA'S NAMES AND BYTES, NOT ITS LOCATION ON DISK. This is the case
+# that licenses every mutation case below it, and its absence is exactly why two of them were red.
+#
+# The old mutation cases copied ${here} — the ORACLE'S OWN DIRECTORY — and edited
+# accepted-differences.json and owed-baseline.txt inside the copy, because under the in-tree layout
+# the judge and the evidence shared a directory and copying one copied the other. Under the shim
+# they do not: ${here} is the installed tool, the data is the product's testing/shadow-oracle, and
+# the `cp` of a data file out of the tool's directory failed with "No such file or directory". The
+# mutation then landed on a file that did not exist, the rev was computed over a data set that was
+# never there, and the case reported that the harness revision had not moved.
+#
+# The fix is to copy the DATA and re-root the tool at it — which is only possible because the
+# product's shim exports BUSBAR_ORACLE_DATA and BUSBAR_ORACLE_PRODUCT_ROOT as DEFAULTS (`${VAR:-…}`)
+# rather than overrides. A shim that forced every run at busbar's real directory would leave this
+# suite unable to mutate anything it judges, and the harness-rev half of it could not exist.
+#
+# So: the same bytes under the same repo-relative names, at a different absolute path, must be the
+# same revision. If they are not, a mutation over a throwaway copy is measuring $TMPDIR.
+hr_alt="$W/alt/$(basename "$data")"
+mkdir -p "$hr_alt/scripts" "$hr_alt/fixtures"
+for f in cells.json golden-digests.tsv plugin-digests.tsv accepted-differences.json \
+         accepted-gaps.json owed-baseline.txt oracle.pin; do
+  [ -f "$data/$f" ] && cp "$data/$f" "$hr_alt/$f"
+done
+[ -d "$data/scripts" ] && cp -R "$data/scripts/." "$hr_alt/scripts/"
+for f in "$data"/fixtures/*.json; do [ -f "$f" ] && cp "$f" "$hr_alt/fixtures/"; done
+hr_here_rev="$(hr_rev_of "$data" "$hr_dp")"
+hr_alt_rev="$(hr_rev_of "$hr_alt" "$W/alt")"
+if [ -n "$hr_here_rev" ] && [ "$hr_here_rev" = "$hr_alt_rev" ]; then
+  say PASS "a byte-identical copy of the data at another path has the same harness revision (so a mutation over a copy proves the real thing)"
+else
+  say FAIL "the harness revision depends on where the data sits, not only on its names and bytes (real=${hr_here_rev:0:12} copy=${hr_alt_rev:0:12}) — every mutation case below is measuring the temp directory"
 fi
 
 # (ac) renormalize.sh IS FAITHFUL TO THE RECORDER'S CALL SITE, OR IT REFUSES. It rewrites a
@@ -731,26 +827,33 @@ else
   say FAIL "renormalize.sh refused a faithful http cell: $(tail -2 "$W/renorm-ok.log")"
 fi
 
-# (y) THE HARNESS REVISION MUST COVER EVERY FILE THAT DECIDES A RECORDING OR A VERDICT. harness_rev
-# is the ONE fact that lets diff-cells refuse a golden and a candidate made under different rules,
-# and four files that decide exactly that were outside it: testing/fleet-fixtures/lib.sh (record.sh
-# and all 20 drivers source it — it supplies `record`, the writer of the ledger rows the differ reads
-# to decide what is OWED), renormalize.sh (rewrites an existing recording's cells in place),
-# accepted-differences.json and owed-baseline.txt (the register and the floor the replay is judged
-# against). Each could change while every recording on disk went on claiming the same revision.
-# Proven by MUTATION, over a copy of the real tree: change the file, the rev must move.
-hrtree="$W/hrtree/testing"
-mkdir -p "$hrtree"
-cp -R "${here}" "$hrtree/shadow-oracle"
-rm -rf "$hrtree/shadow-oracle/golden"
-mkdir -p "$hrtree/fleet-fixtures"
-cp "${here}/../fleet-fixtures/lib.sh" "$hrtree/fleet-fixtures/lib.sh"
-hr_of() { bash "$hrtree/shadow-oracle/harness-rev.sh" | awk '{print $2}'; }
+# (y) A DATA-FILE CHANGE STILL MOVES THE HARNESS REVISION. This is the half of the old model that
+# survives the extraction unchanged, and it is the half that matters most day to day: the judge is
+# upgraded a few times a year, but the register, the floor and the corpus move every week.
+#
+# harness_rev is the ONE fact that lets diff-cells refuse a golden and a candidate made under
+# different rules. accepted-differences.json (the register of divergences the differ FORGIVES) and
+# owed-baseline.txt (the floor of ids the golden must not stop owing) are the two clearest cases:
+# neither is executed while recording, both change the verdict on identical bytes, and each could
+# change while every recording on disk went on claiming the same revision. cells.json decides what
+# is recorded at all; the two digest pins decide which binary and which plugins produced it;
+# accepted-gaps.json forgives an owed regression; oracle.pin decides who reads the result.
+#
+# Proven by MUTATION over the DATA copy built above — whose fidelity (ab-5) has already established.
+# The old version of this loop copied the ORACLE'S directory and mutated inside it, which is why the
+# accepted-differences.json and owed-baseline.txt arms were red: under the shim those files are not
+# in the oracle's directory at all, so the `cp` failed, the mutation landed nowhere, and the case
+# reported a rev that had — correctly, given a data set that was never assembled — not moved.
+hr_of() { hr_rev_of "$hr_alt" "$W/alt"; }
 hr0="$(hr_of)"
-[ -n "$hr0" ] || say FAIL "harness-rev.sh printed no revision over the copied tree"
-for hf in shadow-oracle/renormalize.sh shadow-oracle/accepted-differences.json \
-          shadow-oracle/owed-baseline.txt fleet-fixtures/lib.sh; do
-  printf '\n# harness-rev selftest mutation\n' >>"$hrtree/$hf"
+[ -n "$hr0" ] || say FAIL "harness-rev.sh printed no revision over the copied data"
+for hf in accepted-differences.json owed-baseline.txt cells.json accepted-gaps.json \
+          golden-digests.tsv plugin-digests.tsv oracle.pin; do
+  if [ ! -f "$hr_alt/$hf" ]; then
+    say FAIL "harness_rev cannot be proven to move when ${hf} changes — the data directory has no ${hf}, so the file that decides a verdict is not there to be hashed"
+    continue
+  fi
+  printf '\n# harness-rev selftest mutation\n' >>"$hr_alt/$hf"
   hrN="$(hr_of)"
   if [ -n "$hrN" ] && [ "$hrN" != "$hr0" ]; then
     say PASS "harness_rev moves when ${hf} changes"
@@ -758,10 +861,22 @@ for hf in shadow-oracle/renormalize.sh shadow-oracle/accepted-differences.json \
     say FAIL "harness_rev did NOT move when ${hf} changed — a recording made under a different ${hf} claims the same revision, and the skew guard has nothing to see"
   fi
   # put it back, so each file is proven on its own and the loop compares against the same hr0
-  cp "${here}/../${hf#shadow-oracle/}" "$hrtree/$hf" 2>/dev/null \
-    || cp "${here}/${hf#shadow-oracle/}" "$hrtree/$hf"
+  cp "$data/$hf" "$hr_alt/$hf"
   [ "$(hr_of)" = "$hr0" ] || say FAIL "restoring ${hf} did not restore the revision (the selftest's own fixture drifted)"
 done
+# …and a file APPEARING or DISAPPEARING moves it too. Concatenated contents alone cannot see an
+# empty new fixture or a deleted driver, and both change what gets recorded — which is why the set
+# is hashed with its names, not only its bytes.
+if [ -f "$hr_alt/owed-baseline.txt" ]; then
+  mv "$hr_alt/owed-baseline.txt" "$W/owed-baseline.gone"
+  hr_gone="$(hr_of)"
+  mv "$W/owed-baseline.gone" "$hr_alt/owed-baseline.txt"
+  if [ -n "$hr_gone" ] && [ "$hr_gone" != "$hr0" ] && [ "$(hr_of)" = "$hr0" ]; then
+    say PASS "harness_rev moves when a file leaves the set entirely (names are hashed, not only bytes)"
+  else
+    say FAIL "deleting owed-baseline.txt did not move the harness revision (with=${hr0:0:12} without=${hr_gone:0:12}) — a dropped file is invisible to the skew guard"
+  fi
+fi
 
 # (z) A RE-NORMALIZED RECORDING SAYS SO. renormalize.sh rewrites the normalized cells of a recording
 # that is already on disk, and it is itself in the harness-rev set — so after it runs, the recording

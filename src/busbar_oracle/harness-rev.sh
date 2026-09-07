@@ -103,6 +103,16 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
   #   The fallback matters: with no digest supplied, the tool is being run from inside the tree it
   #   judges (the layout every existing golden was recorded under), so the old file set is hashed
   #   exactly as before and those recordings stay verifiable.
+  #
+  #   AND THE PIN IS A FILE IN THE SET, NOT ONLY AN ENVIRONMENT VARIABLE. `oracle.pin` is the
+  #   product's own committed statement of which judge it runs, and it lives in the data directory
+  #   like every other file here. Hashing only $BUSBAR_ORACLE_TOOL_DIGEST left the set with a member
+  #   that `--files` could not name, which broke this file's own promise that the hash and the list
+  #   can never answer differently: a caller asking "did this change touch the harness?" by diffing
+  #   the list would have said no to a pin bump. It is in the glob now, so a pin bump is a data
+  #   change with a name, visible to `--files`, to a `git diff` and to the hash. The env line stays:
+  #   it records the digest of the tool that ACTUALLY RAN, which a product could otherwise diverge
+  #   from its own committed pin (bin/oracle refuses that, but the rev should not depend on it).
   local d="${BUSBAR_ORACLE_DATA:-$_hr_here}" f
   (
     LC_ALL=C
@@ -117,7 +127,8 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
     fi
     for f in "$d/cells.json" \
              "$d"/scripts/* "$d"/fixtures/*.json "$d/golden-digests.tsv" "$d/plugin-digests.tsv" \
-             "$d/accepted-differences.json" "$d/accepted-gaps.json" "$d/owed-baseline.txt"; do
+             "$d/accepted-differences.json" "$d/accepted-gaps.json" "$d/owed-baseline.txt" \
+             "$d/oracle.pin"; do
       [ -f "$f" ] || continue
       printf '%s\n' "$f"
     done
