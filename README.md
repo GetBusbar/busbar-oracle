@@ -95,10 +95,16 @@ python3 "${BUSBAR_ORACLE_TOOL_DIR:-$here}/capture.py"  … # a TOOL file, throug
 tarball="$(bash "${BUSBAR_ORACLE_TOOL_DIR:-$here}/fetch-plugin.sh" store-sqlite)"
 ```
 
-`record.sh` and `replay.sh` export the variable themselves (as a default, never an
-override), so a driver behaves identically whether it was reached through a
-product's own shim or by running `busbar-oracle record` directly. The `:-$here`
-fallback is for the in-tree layout only.
+`record.sh` and `replay.sh` export the variable themselves — **as a default, never an
+override** — so a driver behaves identically whether it was reached through a
+product's own shim or by running `busbar-oracle record` directly. A shim that
+installed the tool and already knows where it put it keeps the last word; a caller
+that says nothing gets the running driver's own directory. The `:-$here` fallback
+inside a driver is for the in-tree layout only.
+
+The contract is about **the value the driver ends up with**, not about which layer
+set it, and `replay-selftest` asserts both arms: nothing pre-set, and pre-set by the
+caller.
 
 ### What the harness revision covers, and how
 
