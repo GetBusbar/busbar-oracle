@@ -3,7 +3,8 @@
 # Copyright (C) 2026 Busbar Inc and contributors
 """Merge several record.sh outputs (recorded with disjoint --filter sets) into one recording.
 
-    merge-recordings.py --out <dir> [--allow-harness-skew] [--note TEXT] [--cells cells.json] <part>...
+    merge-recordings.py --out <dir> [--allow-harness-skew] [--allow-host-skew]
+                        [--pinned-binaries golden-digests.tsv] [--note TEXT] [--cells cells.json] <part>...
     merge-recordings.py --selftest
 
 A recording is a set of cells: `cells/<id>.json`, `raw/<id>/`, one ledger row each, and a
@@ -13,7 +14,32 @@ cell replaced by a fresh recording from the same published binary. A cell id pre
 is refused: the parts must be disjoint, or the merged ledger would carry two verdicts for one cell.
 
 ── WHAT IDENTIFIES A RECORDING'S SOURCE ────────────────────────────────────────────────────────
-    IDENTITY = version + binary_sha256.  Mismatch -> refused, always.
+    IDENTITY = version + a digest that is one of the release's PINNED PER-TRIPLE BINARIES.
+
+`version` is fatal on mismatch, always: two releases are two products.
+
+The digest rule has a default and a general form, and the general one has to be asked for by name:
+
+  * no --pinned-binaries  -> the digests must be EQUAL. With no pin table there is nothing to check
+                             a foreign digest against, so the only safe reading of two digests is
+                             that they are the same file.
+  * --pinned-binaries <golden-digests.tsv>
+                          -> each part's digest must be one of that version's pinned per-triple
+                             `busbar-<triple>` rows. A release is a SET of binaries, one per triple,
+                             and the table is the product's own enumeration of that set; a digest in
+                             no row is refused exactly as before.
+
+That general form exists because the strict one makes a real recording impossible rather than
+unsafe. busbar's committed golden is `aarch64-apple-darwin`; the three store cells need live
+postgres/mysql/valkey and can only be recorded on Linux CI, against `busbar-x86_64-unknown-linux-gnu`.
+Same release, different files — so under digest equality those cells could never be merged in, and
+would stay permanently unrecorded. What makes the cross-triple merge safe is not that the hosts
+differ but that both digests are pinned, in the same table fetch-golden.sh verifies every download
+and every cache hit against, and whose --check-golden path already accepts a foreign-triple digest.
+
+The archive rows (`busbar-<triple>.tar.gz`, `.zip`) and the sidecar artifacts (`busbar-openapi-*.json`,
+`busbar-*.cdx.json`) share that table and are NOT identity: a tarball's digest proves a download, not
+the file record.sh executed.
 
 `host_triple` says which machine did the recording, not which binary was recorded: the SAME
 published binary can be legitimately re-recorded on a different host (an A8 store-cell rig runs
@@ -27,8 +53,12 @@ published binary can be legitimately re-recorded on a different host (an A8 stor
                                     becomes the merged `host_triple`, every other distinct triple is
                                     pushed onto `host_triple_history` with the part's path and its
                                     binary_sha256, and --note is recorded in `host_triple_note`. The
-                                    binary sha must STILL match across parts either way: a different
-                                    host recording the same bytes is fine, a different binary is not.
+                                    binary sha must STILL satisfy the identity rule above either way:
+                                    a different host recording the same bytes is fine, and so is a
+                                    different host recording that release's OTHER pinned build under
+                                    --pinned-binaries — but an unpinned binary never is, whatever the
+                                    host said. `--allow-host-skew` is about machines, not about
+                                    which build ran; it has never been able to relax the digest.
 
 A PATH IS WHERE A FILE WAS, NOT WHAT IT WAS. meta.json's `binary` is the --bin argument as typed:
 `/Users/runner/.cache/busbar-oracle/1.5.5/busbar` on a CI runner, `/Users/<you>/.cache/...` on a
@@ -66,6 +96,71 @@ import tempfile
 # (skewable with a flag and a note) rather than fatal.
 IDENTITY = ("version", "binary_sha256")
 
+# ── THE PINNED-BINARY IDENTITY ──────────────────────────────────────────────────────────────────
+# `binary_sha256` equality is the right rule for parts of one recording made on one machine, and the
+# wrong rule for the case that actually arises: a release is published as one binary PER TRIPLE, and
+# a cell that needs a live backend can only be recorded on a runner that has one. busbar's committed
+# golden is `aarch64-apple-darwin`; the three store cells can only be recorded on Linux CI against
+# real postgres/mysql/valkey services. Those two recordings are of the SAME published release and of
+# DIFFERENT files, so under strict equality they can never be merged — and the store cells stay
+# permanently unrecorded, which is exactly the gap they were run to close.
+#
+# `--allow-host-skew` is not the answer either: it is deliberately documented as leaving the binary
+# digest fatal, because "recorded somewhere else" must not become a licence to merge a recording of
+# some other build. What makes the cross-triple case safe is not that the hosts differ but that both
+# digests are PINNED — each is a row in golden-digests.tsv, the same table fetch-golden.sh verifies
+# every download and every cache hit against, and the same table its --check-golden path already
+# accepts a foreign-triple digest from. So the identity generalises without weakening:
+#
+#     merge identity = version + a digest that is one of the pinned per-triple rows for that version
+#
+# Equal digests remain the common case and need no table. A caller that wants the general rule names
+# the table it means (`--pinned-binaries golden-digests.tsv`); a digest that is in no row is refused
+# exactly as before, because an unpinned binary is an unknown binary whatever its host said.
+#
+# The pin table has two blocks. The ARCHIVE rows (`busbar-<triple>.tar.gz`, `.zip`) prove a
+# download; the PER-TRIPLE BINARY rows (asset spelled `busbar-<triple>`, no extension) prove the
+# file record.sh actually executes. Only the second block is identity, and the sidecar artifacts
+# that live in the same block (`busbar-openapi-*.json`, `busbar-*.cdx.json`) are not binaries and
+# are excluded by the same extension test fetch-golden.sh uses.
+
+
+def _version_key(version) -> str:
+    """The golden-digests.tsv version column for a meta.json `version` string.
+
+    meta.json carries what the binary printed (`busbar 1.5.5`); the table is keyed on the bare
+    release (`1.5.5`). Splitting on whitespace rather than stripping a `busbar ` prefix keeps this
+    working if the product is ever renamed.
+    """
+    return str(version or "").split()[-1] if str(version or "").strip() else ""
+
+
+def pinned_binaries(digests_path: str, version) -> dict:
+    """{sha256: triple} for every pinned per-triple BINARY row of `version` in the digest table."""
+    want = _version_key(version)
+    out = {}
+    try:
+        with open(digests_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        sys.exit(f"merge-recordings: --pinned-binaries {digests_path}: {e.strerror}")
+    for ln in lines:
+        if ln.startswith("#") or not ln.strip():
+            continue
+        parts = ln.split("\t")
+        if len(parts) < 3:
+            continue
+        ver, asset, sha = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if ver != want or not asset.startswith("busbar-"):
+            continue
+        if asset.endswith((".json", ".zip", ".tar.gz", ".tgz", ".txt", ".sig")):
+            continue  # an archive or a sidecar artifact, not the binary that was executed
+        out[sha] = asset[len("busbar-"):]
+    if not out:
+        sys.exit(f"merge-recordings: --pinned-binaries {digests_path} has no per-triple binary row "
+                 f"for version {want!r}; there is nothing for the identity rule to check against")
+    return out
+
 
 def machine_independent_binary(path: str) -> str:
     """The `binary` bookkeeping path with the operator's name and home layout removed.
@@ -73,7 +168,7 @@ def machine_independent_binary(path: str) -> str:
     A merged golden's meta.json is COMMITTED, and an absolute path under a personal home directory
     names a person and a machine — scripts/public-hygiene-lint.py's `machine-path` rule refuses
     exactly that in a published file. It is safe to rewrite because this field was never the
-    identity: IDENTITY above is (version, binary_sha256, host_triple), and `binary` is carried only
+    identity: the identity above is the version and the pinned digest, and `binary` is carried only
     so a reader knows WHICH well-known location a part came from. That much is kept:
 
         under the repo          -> <repo>/target/release/busbar
@@ -105,14 +200,42 @@ def _load_meta(p: str) -> dict:
 
 
 def merge(parts, out, allow_harness_skew=False, note=None, cells_json=None,
-          allow_host_skew=False) -> int:
+          allow_host_skew=False, pinned_binaries_tsv=None) -> int:
     metas = [(p, _load_meta(p)) for p in parts]
     base_p, base = metas[0]
+    # `version` is fatal on inequality under both rules: two releases are two products, and no pin
+    # table makes them one recording.
     for p, m in metas[1:]:
-        for k in IDENTITY:
-            if m.get(k) != base.get(k):
-                sys.exit(f"merge-recordings: {p} {k}={m.get(k)!r} but {base_p} {k}={base.get(k)!r}; "
-                         "parts of one recording must come from the same binary")
+        if m.get("version") != base.get("version"):
+            sys.exit(f"merge-recordings: {p} version={m.get('version')!r} but "
+                     f"{base_p} version={base.get('version')!r}; "
+                     "parts of one recording must come from the same release")
+    pins = {}
+    if pinned_binaries_tsv:
+        # THE GENERAL IDENTITY: every part's digest must be a pinned per-triple row of the shared
+        # version. Note this is not a relaxation of the strict rule so much as its statement in the
+        # terms the release actually has — a release is a SET of binaries, one per triple, and the
+        # table is the product's own enumeration of that set. A digest in no row is refused here
+        # just as fetch-golden.sh refuses it on download, and for the same reason.
+        pins = pinned_binaries(pinned_binaries_tsv, base.get("version"))
+        unpinned = [(p, m.get("binary_sha256")) for p, m in metas if m.get("binary_sha256") not in pins]
+        if unpinned:
+            detail = "; ".join(f"{p} binary_sha256={s!r}" for p, s in unpinned)
+            sys.exit(f"merge-recordings: {detail} — not a pinned {_version_key(base.get('version'))} "
+                     f"busbar-<triple> row in {pinned_binaries_tsv}. An unpinned binary is an unknown "
+                     "binary whatever host recorded it; pin it (fetch-golden.sh prints the row) or "
+                     "re-record against a published release.")
+    else:
+        # THE STRICT RULE, unchanged, and still the default: with no table named there is nothing to
+        # check a foreign digest against, so the only safe reading of two digests is that they must
+        # be the same file.
+        for p, m in metas[1:]:
+            if m.get("binary_sha256") != base.get("binary_sha256"):
+                sys.exit(f"merge-recordings: {p} binary_sha256={m.get('binary_sha256')!r} but "
+                         f"{base_p} binary_sha256={base.get('binary_sha256')!r}; "
+                         "parts of one recording must come from the same binary "
+                         "(pass --pinned-binaries <golden-digests.tsv> to merge parts recorded "
+                         "against two pinned per-triple builds of one release)")
     # The binary PATH is bookkeeping, not identity: say so out loud rather than refusing on it.
     # The merged meta.json is committed, so every `binary` that reaches it — the base's and each
     # part's in merged_from — is written in the machine-independent form (see the docstring above).
@@ -200,6 +323,18 @@ def merge(parts, out, allow_harness_skew=False, note=None, cells_json=None,
                             "at": m.get("at"), "binary": m.get("binary"), "harness_rev": m.get("harness_rev")}
                            for p, m in metas]
     meta["at"] = max(m.get("at", "") for _, m in metas)
+    if pins and len({m.get("binary_sha256") for _, m in metas}) > 1:
+        # The merged meta stamps ONE binary_sha256 (the base's), so without this the fact that the
+        # cells came from two pinned builds of one release would survive only in the merge note —
+        # prose, which nothing can check. Written as data, per part, naming the triple each digest
+        # is pinned as, so a reader (and diff-cells' provenance gate) can see which file produced
+        # which cells without going back to the table.
+        meta["binary_sha256_pins"] = [
+            {"part": os.path.basename(os.path.normpath(p)),
+             "binary_sha256": m.get("binary_sha256"),
+             "pinned_as": f"busbar-{pins.get(m.get('binary_sha256'))}"}
+            for p, m in metas
+        ]
     if len(revs) > 1:
         # The merged recording is stamped with the rev of the part recorded LAST, and every other
         # rev its cells actually came from is kept in the history rather than dropped on the floor.
@@ -326,6 +461,93 @@ def selftest() -> int:
          [("a", ["x|1"], {}), ("b", ["x|2"], {"harness_rev": "bbbb", "at": "2026-09-06T01:00:00Z"})],
          ["--allow-harness-skew", "--note", "x|2 re-recorded under bbbb"], 0, "HARNESS SKEW ALLOWED")
 
+    # ── THE PINNED-BINARY IDENTITY, BOTH ARMS ───────────────────────────────────────────────────
+    # The rule is "version + a digest that is one of the pinned per-triple rows", so it has exactly
+    # two things to prove: a digest that IS such a row is accepted even though it differs from the
+    # base's, and a digest that is NOT is refused even though the flag is present. A rule with only
+    # its permissive arm tested is a rule nobody has checked can still say no.
+    def _pins_tsv(t):
+        p = os.path.join(t, "golden-digests.tsv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("# version\tasset\tsha256\n")
+            f.write("1.5.5\tbusbar-aarch64-apple-darwin.tar.gz\tarchive0\n")  # archive row: NOT identity
+            f.write("1.5.5\tbusbar-aarch64-apple-darwin\t48e2800c\n")
+            f.write("1.5.5\tbusbar-x86_64-unknown-linux-gnu\t84bde0a0\n")
+            f.write("1.5.5\tbusbar-openapi-v1.5.5.json\tsidecar0\n")  # sidecar row: NOT a binary
+            f.write("1.6.0\tbusbar-x86_64-unknown-linux-gnu\totherrelease\n")
+        return p
+
+    with tempfile.TemporaryDirectory() as t:
+        tsv = _pins_tsv(t)
+        a = _part(t, "a", ["x|1"])
+        b = _part(t, "b", ["x|2"], binary_sha256="84bde0a0", host_triple="x86_64-unknown-linux-gnu",
+                  at="2026-09-06T01:00:00Z")
+        r = subprocess.run([sys.executable, me, "--out", os.path.join(t, "m"), "--pinned-binaries", tsv,
+                            "--allow-host-skew", "--note", "store cells on linux CI", a, b],
+                           capture_output=True, text=True)
+        ok = r.returncode == 0
+        pins_rec = []
+        if ok:
+            m = json.load(open(os.path.join(t, "m", "meta.json"), encoding="utf-8"))
+            pins_rec = m.get("binary_sha256_pins", [])
+            ok = ({e["pinned_as"] for e in pins_rec}
+                  == {"busbar-aarch64-apple-darwin", "busbar-x86_64-unknown-linux-gnu"}
+                  and m["recorded"] == 2)
+        print(("PASS  " if ok else "FAIL  ")
+              + "two digests that are two pinned per-triple rows of ONE release merge, and the meta records which build made which cells"
+              + ("" if ok else f"  rc={r.returncode} pins={pins_rec} out={(r.stdout + r.stderr).strip()[:200]}"))
+        fails += 0 if ok else 1
+
+    case("a digest in NO pinned row -> refused even with --pinned-binaries",
+         [("a", ["x|1"], {}), ("b", ["x|2"], {"binary_sha256": "deadbeef",
+                                              "host_triple": "x86_64-unknown-linux-gnu"})],
+         ["--allow-host-skew", "--note", "N"], 1, "binary_sha256")
+    with tempfile.TemporaryDirectory() as t:
+        tsv = _pins_tsv(t)
+        a = _part(t, "a", ["x|1"])
+        b = _part(t, "b", ["x|2"], binary_sha256="deadbeef", host_triple="x86_64-unknown-linux-gnu")
+        r = subprocess.run([sys.executable, me, "--out", os.path.join(t, "m"), "--pinned-binaries", tsv,
+                            "--allow-host-skew", "--note", "N", a, b], capture_output=True, text=True)
+        blob = r.stdout + r.stderr
+        ok = r.returncode != 0 and "not a pinned" in blob
+        print(("PASS  " if ok else "FAIL  ")
+              + "an UNPINNED digest is refused even under --pinned-binaries (the rule can still say no)"
+              + ("" if ok else f"  rc={r.returncode} out={blob.strip()[:200]}"))
+        fails += 0 if ok else 1
+
+    # An ARCHIVE row and a SIDECAR row share the table with the binary rows and are not identity:
+    # the tarball's digest proves a download, not the file record.sh executed.
+    for label, sha in (("an archive row's digest", "archive0"), ("a sidecar artifact's digest", "sidecar0")):
+        with tempfile.TemporaryDirectory() as t:
+            tsv = _pins_tsv(t)
+            a = _part(t, "a", ["x|1"])
+            b = _part(t, "b", ["x|2"], binary_sha256=sha, host_triple="x86_64-unknown-linux-gnu")
+            r = subprocess.run([sys.executable, me, "--out", os.path.join(t, "m"), "--pinned-binaries",
+                                tsv, "--allow-host-skew", "--note", "N", a, b],
+                               capture_output=True, text=True)
+            ok = r.returncode != 0
+            print(("PASS  " if ok else "FAIL  ") + f"{label} is not a per-triple binary row, so it is refused"
+                  + ("" if ok else f"  rc={r.returncode}"))
+            fails += 0 if ok else 1
+
+    # A row for a DIFFERENT release is not a row for this one: the table is keyed on both columns.
+    with tempfile.TemporaryDirectory() as t:
+        tsv = _pins_tsv(t)
+        a = _part(t, "a", ["x|1"])
+        b = _part(t, "b", ["x|2"], binary_sha256="otherrelease", host_triple="x86_64-unknown-linux-gnu")
+        r = subprocess.run([sys.executable, me, "--out", os.path.join(t, "m"), "--pinned-binaries", tsv,
+                            "--allow-host-skew", "--note", "N", a, b], capture_output=True, text=True)
+        ok = r.returncode != 0
+        print(("PASS  " if ok else "FAIL  ")
+              + "a pinned row belonging to a DIFFERENT release is not identity for this one"
+              + ("" if ok else f"  rc={r.returncode}"))
+        fails += 0 if ok else 1
+
+    # Without the table the strict rule is untouched — the general rule is opt-in by naming the pins.
+    case("different binary_sha256 and NO --pinned-binaries -> refused as before",
+         [("a", ["x|1"], {}), ("b", ["x|2"], {"binary_sha256": "84bde0a0"})],
+         [], 1, "--pinned-binaries")
+
     # the skewed merge's meta must be stamped with the LAST-recorded rev and keep the other in history
     with tempfile.TemporaryDirectory() as t:
         a = _part(t, "a", ["x|1"])
@@ -383,6 +605,10 @@ def main() -> int:
                     help="merge parts recorded under different harness revisions (needs --note)")
     ap.add_argument("--allow-host-skew", action="store_true",
                     help="merge parts recorded on different hosts (needs --note); binary_sha256 must still match")
+    ap.add_argument("--pinned-binaries", metavar="TSV", default=None,
+                    help="golden-digests.tsv: state the identity as version + a digest that is one of "
+                         "the pinned per-triple busbar-<triple> rows, instead of digest equality. A "
+                         "digest in no row is still refused.")
     ap.add_argument("--note", default="",
                     help="prepended to the merged meta.json's harness_rev_note/host_triple_note; required for a skewed merge")
     ap.add_argument("--cells", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cells.json"),
@@ -394,8 +620,9 @@ def main() -> int:
         return selftest()
     if not a.out or not a.parts:
         sys.exit("usage: merge-recordings.py --out <dir> [--allow-harness-skew] [--allow-host-skew] "
-                 "[--note TEXT] <part>...")
-    return merge(a.parts, a.out, a.allow_harness_skew, a.note, a.cells, a.allow_host_skew)
+                 "[--pinned-binaries TSV] [--note TEXT] <part>...")
+    return merge(a.parts, a.out, a.allow_harness_skew, a.note, a.cells, a.allow_host_skew,
+                 a.pinned_binaries)
 
 
 if __name__ == "__main__":
