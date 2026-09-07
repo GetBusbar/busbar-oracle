@@ -472,6 +472,8 @@ LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:\d{2,5}\b")
 PLATFORM_CAPABILITY_LINES = (
     # darwin: jemalloc's background_thread runs off pthread_create at a point macOS forbids it.
     re.compile(r"^\[warn\] could not enable jemalloc background purge thread\b.*$"),
+    # the same fact, as busbar 1.6.0 spells it: an [info] line naming the target, not a [warn].
+    re.compile(r"^\[info\] jemalloc background purge thread unavailable on this target\b.*$"),
 )
 
 

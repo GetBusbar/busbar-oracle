@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: busbar-oracle
-Version: 0.2.2
+Version: 0.2.3
 Summary: A shadow oracle: record a released binary's exact behaviour per cell, and replay it against any later one.
 Author: Busbar Inc and contributors
 License: Apache-2.0

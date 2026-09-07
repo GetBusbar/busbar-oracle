@@ -1120,7 +1120,14 @@ def norm(lines):
                                      capture_output=True, text=True, check=True).stdout)
 with_host = norm(base[:1] + [jem] + base[1:])
 without    = norm(base)
-json.dump({"same_stderr": with_host["effects"]["stderr"] == without["effects"]["stderr"],
+# The 1.6.0 spelling of the same host fact: an [info] line naming the target. Both spellings are
+# the recording host's capability, and both must vanish, or a darwin candidate diverges from a
+# linux golden on every boot cell by a sentence about the machine.
+jem_info = "[info] jemalloc background purge thread unavailable on this target (`name` or `mib` specifies an unknown/invalid value.) — EXPECTED on macOS; busbar's idle-purge fallback keeps RSS returning to idle after a load burst"
+with_info = norm(base[:1] + [jem_info] + base[1:])
+json.dump({"same_stderr": with_host["effects"]["stderr"] == without["effects"]["stderr"]
+                          and with_info["effects"]["stderr"] == without["effects"]["stderr"]
+                          and "stderr.platform-capability" in with_info["applied"],
            "rule_on_golden": "stderr.platform-capability" in with_host["applied"],
            "rule_on_candidate": "stderr.platform-capability" in without["applied"]},
           open(os.path.join(w, "dd.json"), "w"))
