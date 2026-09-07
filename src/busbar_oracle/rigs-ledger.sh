@@ -95,7 +95,13 @@
 #   it by never providing one.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -106,7 +112,7 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 BIN="" REBASELINE=0 CHECK=0 SELFTEST=0
-BASELINE="${here}/rigs-baseline.json"
+BASELINE="${data}/rigs-baseline.json"
 WORK="${RIGS_LEDGER_WORK:-${repo}/target/rigs-ledger}"
 
 # Mirrors testing/shadow-oracle/replay.sh's owed-baseline discipline: a rig's OWN verdict can shrink

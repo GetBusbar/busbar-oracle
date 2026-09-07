@@ -1,1 +1,0 @@
-{"applied":[],"body":{"text":""},"effects":{"exec_rules":[],"stderr":"busbar: --migrate-config requires a path: busbar --migrate-config <old-config.yaml>\n"},"headers":{},"status":2}

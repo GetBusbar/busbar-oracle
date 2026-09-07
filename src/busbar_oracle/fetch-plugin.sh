@@ -10,7 +10,13 @@
 #   prints the cached tarball path on success. Exit 3 on digest mismatch (download deleted).
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 # shellcheck source=../fleet-fixtures/lib.sh
 source "${repo}/testing/fleet-fixtures/lib.sh"
 NAME="${1:?plugin repo name (e.g. store-sqlite)}"; shift || true
@@ -21,7 +27,7 @@ case "$(uname -sm)" in
   "Linux aarch64"|"Linux arm64") TRIPLE=aarch64-unknown-linux-gnu ;; "Linux x86_64") TRIPLE=x86_64-unknown-linux-gnu ;;
   *) echo "fetch-plugin: unsupported host" >&2; exit 2 ;;
 esac
-row="$(awk -F'\t' -v n="$NAME" -v t="$TRIPLE" '$1==n && index($3,t) {print; exit}' "${here}/plugin-digests.tsv")"
+row="$(awk -F'\t' -v n="$NAME" -v t="$TRIPLE" '$1==n && index($3,t) {print; exit}' "${data}/plugin-digests.tsv")"
 [ -n "$row" ] || { echo "fetch-plugin: no pinned asset for ${NAME} on ${TRIPLE}" >&2; exit 2; }
 TAG="$(printf '%s' "$row" | cut -f2)"; ASSET="$(printf '%s' "$row" | cut -f3)"; WANT="$(printf '%s' "$row" | cut -f4)"
 DIR="${CACHE_ROOT}/plugins/${NAME}/${TAG}"; OUT="${DIR}/${ASSET}"

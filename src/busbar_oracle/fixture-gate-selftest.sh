@@ -22,6 +22,10 @@
 # replay-selftest.sh before anything expensive starts.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
 # shellcheck source=oracle-config.sh
 source "${here}/oracle-config.sh"
 
@@ -53,8 +57,8 @@ ORACLE_SELFTEST_FIXTURE_URL="postgres://u@h/db" case_is RECORD ORACLE_SELFTEST_F
 # files that actually run, not restated here — a copy of the map in this test would be a third
 # thing to keep in step, and it would pass while the two real ones disagreed.
 echo "fixture gate: the cells and store-persist.sh name the same variable"
-CELLS="${here}/cells.json"
-SCRIPT="${here}/scripts/store-persist.sh"
+CELLS="${data}/cells.json"
+SCRIPT="${data}/scripts/store-persist.sh"
 if [ ! -s "$CELLS" ]; then
   bad "(f) no cells.json — run enumerate-cells.py --write"
 else

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "busbar-oracle"
+version = "0.1.0"
+description = "A shadow oracle: record a released binary's exact behaviour per cell, and replay it against any later one."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [{ name = "Busbar Inc and contributors" }]
+keywords = ["golden-testing", "characterization-testing", "regression", "parity"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Testing",
+]
+# No third-party runtime dependencies, on purpose. The oracle must be able to judge a
+# workspace without sharing anything with it -- an installed package is one more thing
+# that could differ between the run that recorded a cell and the run that replays it.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/GetBusbar/busbar-oracle"
+Source = "https://github.com/GetBusbar/busbar-oracle"
+
+[project.scripts]
+busbar-oracle = "busbar_oracle.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The shipped bash drivers and the tool's own self-test fixture travel with the package:
+# they ARE the tool, not build inputs.
+[tool.setuptools.package-data]
+busbar_oracle = [
+  "*.sh",
+  "*.py",
+  "fleet_fixtures/*.sh",
+  "fixtures/selftest-recording/**",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+# The recorder/normalizer/differ came out of busbar's tree with their own long-form
+# comments; those are the specification of how a cell is judged and are not reflowed.
+extend-exclude = []
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",   # long lines are load-bearing prose in the norm rules
+  "UP038",
+]

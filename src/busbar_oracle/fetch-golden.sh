@@ -29,7 +29,13 @@
 #                           check against — a caller replaying two recordings can carry on.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 # shellcheck source=../fleet-fixtures/lib.sh
 source "${repo}/testing/fleet-fixtures/lib.sh"
 # shellcheck source=harness-rev.sh
@@ -45,7 +51,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-DIGESTS="${here}/golden-digests.tsv"
+DIGESTS="${data}/golden-digests.tsv"
 CACHE="${CACHE_ROOT}/${VERSION}"
 BIN="${CACHE}/busbar"
 

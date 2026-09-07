@@ -90,7 +90,7 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
   #                               the list is built or hashed did not move it at all.
   #   rigs-baseline.json is deliberately NOT here: it is the sign-off floor of the SEPARATE plane-rigs
   #   gate (rigs-ledger.sh), which has its own verdict and never reads an LLM-plane recording.
-  local d="$_hr_here" f
+  local d="${BUSBAR_ORACLE_DATA:-$_hr_here}" f
   (
     LC_ALL=C
     for f in "$d/cells.json" "$d"/*.py "$d/oracle-config.sh" "$d/record.sh" "$d/renormalize.sh" \
@@ -104,7 +104,7 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
   )
 }
 
-_hr_repo() { (cd "$_hr_here/../.." && pwd); }
+_hr_repo() { if [ -n "${BUSBAR_ORACLE_PRODUCT_ROOT:-}" ]; then printf '%s\n' "$BUSBAR_ORACLE_PRODUCT_ROOT"; else (cd "$_hr_here/../.." && pwd); fi; }
 
 harness_rev_files() {  # the same set, as repo-relative paths (ci.yml's cache key, land.sh, humans)
   local repo; repo="$(_hr_repo)" || return 1

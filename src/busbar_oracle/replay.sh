@@ -27,10 +27,16 @@
 # the current golden's owed set as the new baseline and rewrites the file.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 
-GOLDEN="" CAND="" OUT="" CELLS="${here}/cells.json" FAMILY="" ACCEPTED="${here}/accepted-differences.json"
-ALLOW_SKEW=0 BASELINE="${here}/owed-baseline.txt" ACCEPTED_GAPS="${here}/accepted-gaps.json" REBASELINE=0 CHECK_GOLDEN=1
+GOLDEN="" CAND="" OUT="" CELLS="${data}/cells.json" FAMILY="" ACCEPTED="${data}/accepted-differences.json"
+ALLOW_SKEW=0 BASELINE="${data}/owed-baseline.txt" ACCEPTED_GAPS="${data}/accepted-gaps.json" REBASELINE=0 CHECK_GOLDEN=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --golden) GOLDEN="$2"; shift 2 ;;

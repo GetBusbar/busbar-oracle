@@ -14,7 +14,11 @@
 # and named, never silently re-normalized under someone else's spec.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-d="" CELLS="${here}/cells.json"; n=0; kept=0; unknown=0; failed=0
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+d="" CELLS="${data}/cells.json"; n=0; kept=0; unknown=0; failed=0
 while [ $# -gt 0 ]; do
   case "$1" in
     # the corpus whose per-cell specs are replayed. Defaults to the shipped one; an explicit path

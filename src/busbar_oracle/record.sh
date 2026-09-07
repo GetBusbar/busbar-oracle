@@ -28,7 +28,13 @@
 # upstream_down flips the mock's CONTROL FILE for the duration of the cell; busbar sees nothing.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 # shellcheck source=../fleet-fixtures/lib.sh
 source "${repo}/testing/fleet-fixtures/lib.sh"
 # shellcheck source=oracle-config.sh
@@ -489,7 +495,7 @@ record_exec_cell() {  # <id> <cell-json> <raw-dir> <safe>
       # ref the migrated document still carries (e.g. v1.5.1/v1.5.2 ship one already), and stub every
       # `env:NAME` secret ref so --validate fails on the migration, never on this machine's env.
       "$BIN" --migrate-config "${repo}/${cfg#migrated:}" >"$xwork/migrated.yaml" 2>/dev/null
-      python3 "${here}/scripts/apply-deferred-decisions.py" "$xwork/migrated.yaml" \
+      python3 "${data}/scripts/apply-deferred-decisions.py" "$xwork/migrated.yaml" \
         --stand-in "$xwork/corpus-secret" >"$xwork/migrated-ready.yaml"
       cfgfile="$xwork/migrated-ready.yaml"
       corpus_prov="$(corpus_providers_for "${cfg#migrated:}")"
@@ -931,7 +937,7 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
     local_tmp="$WORK/cell-tmp/$safe"; rm -rf "$local_tmp"; mkdir -p "$local_tmp"
     BUSBAR_BIN="$BIN" RAW="$raw" WORK="$WORK" ORACLE_ADMIN_TOKEN="$ORACLE_ADMIN_TOKEN" TMPDIR="$local_tmp" \
       SCRIPT_LISTEN_PORT="$LISTEN_PORT" SCRIPT_ADMIN_PORT="$ADMIN_PORT" SCRIPT_MOCK_PORT="$(script_mock_port)" \
-      bash "${here}/scripts/${sname}" "${local_args[@]}" >"$raw/script.log" 2>&1
+      bash "${data}/scripts/${sname}" "${local_args[@]}" >"$raw/script.log" 2>&1
     [ -s "$raw/captured.json" ] || { record "$id" FAIL "script ${sname} produced no captured.json" "$(tail -c 300 "$raw/script.log")"; continue; }
     # STRIP THE DIRECTORIES THIS RUN CHOSE, exactly as record_exec_cell does for an exec cell. A
     # script cell quotes busbar's own stdout back into its effects ("plugins dir: <path>", a
@@ -1162,7 +1168,7 @@ done < <(jq -r --arg p "$PLANE" '
       (if (.keep // null) == null then "" else (.keep | tojson) end),
       ((.needs_fixture // false) | tostring),
       .plane,
-      tojson ] | join("\u001f")' "${here}/cells.json")
+      tojson ] | join("\u001f")' "${data}/cells.json")
 
 # Provenance: which harness revision (cells.json/normalize.py/etc — see harness-rev.sh) and which
 # exact binary file produced this recording, plus the host triple, so a later diff can tell "busbar

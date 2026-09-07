@@ -44,6 +44,10 @@
 # below works on a `cp -R` of it, never the tracked copy itself.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# The PRODUCT'S oracle data (cells.json, golden/, the registers, the cell drivers).
+# Defaults to the tool's own directory, which is the in-tree layout this harness grew up
+# in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
+data="${BUSBAR_ORACLE_DATA:-$here}"
 FIX="${here}/fixtures/selftest-recording"
 CELLS="${FIX}/cells.json"
 W="$(mktemp -d "${TMPDIR:-/tmp}/oracle-replay-selftest.XXXXXX")"
@@ -439,7 +443,7 @@ grep -q "declares no \`expected_cells\`" "$W/out-w3.log" && msg_ok=1 || msg_ok=0
 # …and the SHIPPED register is loaded against the SHIPPED corpus, so the guard is proven against the
 # real file rather than only against fixtures: a widened live entry fails HERE, not in CI.
 if python3 "${here}/diff-cells.py" --golden "$FIX" --candidate "$W/width" --out "$W/out-w4" \
-     --cells "${here}/cells.json" --accepted "${here}/accepted-differences.json" \
+     --cells "${data}/cells.json" --accepted "${data}/accepted-differences.json" \
      --allow-harness-skew >"$W/out-w4.log" 2>&1; then
   say PASS "the shipped accepted-differences.json loads against the shipped cells.json"
 else
@@ -479,7 +483,7 @@ done < <(awk '
 # verb at all. They are `needs_fixture` today, which is the only reason no golden froze the healthy
 # stream in place of the mid-stream failure it claims to record. The guard is STATIC and runs over the
 # SHIPPED cells.json, so it also catches the next control shape somebody invents.
-mock_ctl_bad="$(python3 "${here}/mock-upstream.py" --check-controls "${here}/cells.json" 2>&1)" && mock_ctl_rc=0 || mock_ctl_rc=$?
+mock_ctl_bad="$(python3 "${here}/mock-upstream.py" --check-controls "${data}/cells.json" 2>&1)" && mock_ctl_rc=0 || mock_ctl_rc=$?
 [ "$mock_ctl_rc" = 0 ] \
   && say PASS "every mock_control in cells.json resolves to a verb mock-upstream.py implements" \
   || say FAIL "cell(s) declare a mock_control the mock resolves to NO verb, so the outage they order is served as a healthy 200: ${mock_ctl_bad}"
@@ -531,10 +535,10 @@ done
 # the baseline is a cell that can silently stop being owed later with nothing to catch it: exactly
 # the regression owed-baseline.txt exists to make impossible. (`http.crosscut|413|gemini-path` was
 # such a cell.) Only checked when the real golden is present in the tree.
-GOLD="${here}/golden/1.5.5"
-if [ -s "${GOLD}/ledger.tsv" ] && [ -s "${here}/owed-baseline.txt" ]; then
+GOLD="${data}/golden/1.5.5"
+if [ -s "${GOLD}/ledger.tsv" ] && [ -s "${data}/owed-baseline.txt" ]; then
   awk -F'\t' '$2=="PASS"{print $1}' "${GOLD}/ledger.tsv" | LC_ALL=C sort -u >"$W/gold-pass.txt"
-  grep -v '^[[:space:]]*$' "${here}/owed-baseline.txt" | LC_ALL=C sort -u >"$W/base.txt"
+  grep -v '^[[:space:]]*$' "${data}/owed-baseline.txt" | LC_ALL=C sort -u >"$W/base.txt"
   unowed="$(comm -23 "$W/gold-pass.txt" "$W/base.txt" | tr '\n' ' ')"
   [ -z "$(printf '%s' "$unowed" | tr -d ' ')" ] \
     && say PASS "every golden PASS id is named in owed-baseline.txt (the ratchet covers all of them)" \
@@ -577,7 +581,7 @@ compare_case typo '{"compare":["stauts"],"why":"selftest"}' 'unknown compare cla
 # …and the SHIPPED corpus obeys the policy, so a future `compare: [status]` on a real cell is red
 # here rather than green forever.
 if python3 "${here}/diff-cells.py" --golden "$FIX" --candidate "$W/same" --out "$W/out-x-ship" \
-     --cells "${here}/cells.json" --accepted "${here}/accepted-differences.json" \
+     --cells "${data}/cells.json" --accepted "${data}/accepted-differences.json" \
      --allow-harness-skew >"$W/out-x-ship.log" 2>&1; then
   say PASS "every 'compare' in the shipped cells.json obeys the policy"
 else
@@ -1198,7 +1202,7 @@ cls="$(classes_of 'self|a|ok' "$W/out-hh")"
 # for a reason that is not busbar. This case reads the marker list out of the RUST SOURCE and holds
 # record.sh to it, so a third marker added to SUPERVISOR_MARKERS tomorrow is red here rather than
 # silently re-opening the hole.
-src="${here}/../../crates/busbar-core/src/admin/restart.rs"
+src="${repo}/crates/busbar-core/src/admin/restart.rs"
 if [ -f "$src" ]; then
   want="$(grep -oE 'SUPERVISOR_MARKERS[^=]*= *\[[^]]*\]' "$src" | grep -oE '"[A-Z_]+"' | tr -d '"' | LC_ALL=C sort -u)"
   got="$(grep -oE '^unset [A-Z_ ]+' "${here}/record.sh" | sed 's/^unset //' | tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort -u)"

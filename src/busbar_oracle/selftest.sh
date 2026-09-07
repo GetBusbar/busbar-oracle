@@ -28,7 +28,9 @@
 # defaults, and the EXIT trap below removes them whichever way this script leaves.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "${here}/../.." && pwd)"
+# The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
+# inside that product; it is now shipped separately, so the root is passed in.
+repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 # shellcheck source=oracle-config.sh
 source "${here}/oracle-config.sh"
 
