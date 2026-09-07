@@ -48,9 +48,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # Defaults to the tool's own directory, which is the in-tree layout this harness grew up
 # in; busbar now passes its own testing/shadow-oracle via BUSBAR_ORACLE_DATA.
 data="${BUSBAR_ORACLE_DATA:-$here}"
-# The PRODUCT this oracle judges. One check below reads a source file out of it; that check
-# skips itself when the product is not present, so the self-tests still run tool-only.
-repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
 FIX="${here}/fixtures/selftest-recording"
 CELLS="${FIX}/cells.json"
 W="$(mktemp -d "${TMPDIR:-/tmp}/oracle-replay-selftest.XXXXXX")"

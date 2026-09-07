@@ -1,0 +1,146 @@
+Metadata-Version: 2.4
+Name: busbar-oracle
+Version: 0.1.0
+Summary: A shadow oracle: record a released binary's exact behaviour per cell, and replay it against any later one.
+Author: Busbar Inc and contributors
+License: Apache-2.0
+Project-URL: Homepage, https://github.com/GetBusbar/busbar-oracle
+Project-URL: Source, https://github.com/GetBusbar/busbar-oracle
+Keywords: golden-testing,characterization-testing,regression,parity
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Software Development :: Testing
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# busbar-oracle
+
+A **shadow oracle**: it records exactly what a released binary does — bytes and side
+effects, per *cell* — and replays that recording against any later binary, so a
+difference in the report is a difference in the product.
+
+It was built to keep [busbar](https://github.com/GetBusbar/busbar) honest across a
+major version. Nothing in this repository knows anything about busbar.
+
+## What a cell is
+
+A cell is one addressable behaviour: a method on a transport under a role, an admin
+operation, a boot refusal, a CLI invocation, a metrics scrape. Recording a cell
+captures its response bytes *and* its effects — what it wrote, what it billed, what
+it logged, what a follow-up read returns — then normalizes away the things that are
+allowed to differ between two runs of the *same* binary (timestamps, ports, generated
+keys, paths) using rules that are themselves part of the record.
+
+Replaying compares a candidate's cells against the golden's, class by class. A
+difference is RED unless the product's own register forgives it, and a forgiveness
+must say which cells it covers and how many.
+
+## Why Python, and why it ships separately
+
+The oracle judges a workspace, so it must not share anything with it. A separate
+interpreter, a separate dependency set (there are no third-party dependencies at
+all), a separate release cadence, and a pinned digest on the consuming side: none of
+the product's toolchain can move the oracle's verdict without that move being
+visible as a changed pin.
+
+## Install
+
+```
+pip install busbar-oracle            # from a release artifact or a checkout
+busbar-oracle --help
+```
+
+## Use
+
+The product being judged, and that product's oracle data, are arguments:
+
+```
+busbar-oracle --product-root /path/to/product --data /path/to/product/oracle-data \
+  record --bin /path/to/product/target/release/candidate --plane all --out ./recordings/candidate
+
+busbar-oracle --product-root /path/to/product --data /path/to/product/oracle-data \
+  replay --golden ./oracle-data/golden/1.5.5 --candidate ./recordings/candidate --out ./reports/run
+```
+
+- `--data` holds `cells.json`, `golden/`, the accepted-difference and accepted-gap
+  registers, the owed baseline, the digest pins, the fixtures and the per-cell
+  drivers under `scripts/`. All of it describes the *product*.
+- `--product-root` is the product itself — its binary, its sources.
+
+Both default to the old in-tree derivation (`<tool>/..` and `<tool>/../..`), so a
+project that still keeps the oracle inside its own tree needs neither flag.
+
+Every other flag is passed through to the underlying driver unchanged.
+
+## Subcommands
+
+| command | driver | does |
+|---|---|---|
+| `record` | `record.sh` | run a product's cells, write a recording |
+| `replay` | `replay.sh` | judge a candidate recording against a golden |
+| `diff` | `diff-cells.py` | the verdict itself — replay's judging half |
+| `normalize` | `normalize.py` | apply the norm rules to a captured cell |
+| `merge` | `merge-recordings.py` | fold recordings into one golden |
+| `renormalize` | `renormalize.sh` | re-apply the norm rules to an existing recording |
+| `harness-rev` | `harness-rev.sh` | the revision of what records and judges |
+| `selftest` | `selftest.sh` | the tool's own self-tests |
+| `fetch-golden` | `fetch-golden.sh` | fetch and digest-verify a pinned golden binary |
+| `mock` | `mock-upstream.py` | the multi-dialect mock upstream |
+
+Also available: `replay-selftest`, `fetch-plugin`, `rigs-ledger`, `apply-mutation`,
+`build-request`, `capture`, `fixture-gate-selftest`.
+
+## Ported to Python, or shipped as a script?
+
+**Nothing was ported. Every bash driver ships as the file that produced the existing
+goldens**, and `busbar-oracle` dispatches to it.
+
+That is a deliberate line, and it is drawn at a specific place: *a driver that
+records a cell, judges a cell, or verifies a pinned digest may not be rewritten
+during a move.* Every bash file here does one of those three things:
+
+| file | lines | why it is not a port |
+|---|---|---|
+| `record.sh` | ~1080 | records |
+| `rigs-ledger.sh` | ~840 | records, and writes the ledger a verdict is read from |
+| `replay-selftest.sh` | ~430 | judges the judge |
+| `oracle-config.sh` | ~290 | decides what the recorded binary is configured with — a config change moves 30+ cells |
+| `fetch-golden.sh` | ~230 | verifies a pinned digest |
+| `replay.sh` | ~200 | judges |
+| `selftest.sh` | ~90 | judges |
+| `harness-rev.sh` | ~76 | *is* the definition of "the harness changed"; its output is committed into every golden |
+| `renormalize.sh` | ~69 | rewrites recordings |
+| `fetch-plugin.sh` | ~45 | verifies a pinned digest |
+
+`harness-rev.sh` and `fetch-plugin.sh` are thin enough to port, and were left alone
+anyway: one emits a hash that is already committed inside every existing golden's
+`meta.json`, and a port that changed glob order, locale or newline handling would
+silently invalidate every one of them; the other is the digest check that decides
+whether a downloaded binary is the one that was pinned. Neither is worth the risk
+for the size of the win.
+
+If a driver is ever ported, the bar is the same bar this repository's own release
+used: the ported tool must produce **byte-identical report output** on the same
+golden/candidate pair before the script is deleted.
+
+## Self-tests
+
+```
+busbar-oracle selftest                 # the recorder/normalizer/differ's own arms
+busbar-oracle fixture-gate-selftest    # both arms of the fixture gate
+busbar-oracle replay-selftest          # the judge, against a fixture recording
+```
+
+These run against the tiny fixture product in `tests/fixture-product/` and need no
+real binary, so the tool is testable in this repository alone.
+
+## Versioning
+
+Released by tag. Consumers should pin a tag *and* the sha256 of the release archive,
+and treat a change to either as a harness change — because it is one.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

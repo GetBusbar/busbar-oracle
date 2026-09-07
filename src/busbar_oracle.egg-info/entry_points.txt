@@ -1,0 +1,2 @@
+[console_scripts]
+busbar-oracle = busbar_oracle.cli:main
