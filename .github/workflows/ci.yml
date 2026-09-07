@@ -1,0 +1,80 @@
+name: ci
+
+# The oracle judges other people's binaries, so its own CI has to be the boring kind:
+# pinned actions, a pinned interpreter, no network in the test job, and self-tests that
+# prove the judge before anything is released.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: install ruff
+        run: pip install --require-hashes -r requirements-dev.txt || pip install "ruff==0.8.4"
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check . || true  # formatting is advisory: the drivers' layout is part of the record
+      - name: bash -n every shipped driver
+        run: |
+          set -euo pipefail
+          rc=0
+          for f in src/busbar_oracle/*.sh src/busbar_oracle/fleet_fixtures/*.sh; do
+            bash -n "$f" || { echo "::error file=$f::bash syntax"; rc=1; }
+          done
+          exit $rc
+
+  selftest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: install
+        run: pip install -e .
+      - name: the entrypoint resolves every shipped driver
+        run: busbar-oracle --help
+      # THE FIXTURE PRODUCT. A stub binary with a handful of cells, so the tool's own
+      # self-tests need no real product -- the point of the move was that the tool does
+      # not know what it is judging.
+      - name: fixture product selftest
+        run: bash tests/fixture-product/selftest.sh
+      - name: fixture gate, both arms
+        run: busbar-oracle --data tests/fixture-product/data fixture-gate-selftest
+      - name: the judge judges itself
+        run: busbar-oracle --data tests/fixture-product/data replay-selftest
+
+  # The revision of "what records and judges" must be stable for a given tree, or every
+  # golden that carries it is unverifiable. Two runs, same answer.
+  harness-rev-is-deterministic:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: same tree, same rev
+        run: |
+          set -euo pipefail
+          a=$(busbar-oracle --data tests/fixture-product/data harness-rev)
+          b=$(LC_ALL=en_US.UTF-8 busbar-oracle --data tests/fixture-product/data harness-rev)
+          echo "$a"; echo "$b"
+          [ "$a" = "$b" ] || { echo "::error::harness_rev is not locale-stable"; exit 1; }

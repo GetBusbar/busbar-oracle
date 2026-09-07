@@ -90,14 +90,34 @@ _hr_files() {  # print, one per line, every file whose contents decide what gets
   #                               the list is built or hashed did not move it at all.
   #   rigs-baseline.json is deliberately NOT here: it is the sign-off floor of the SEPARATE plane-rigs
   #   gate (rigs-ledger.sh), which has its own verdict and never reads an LLM-plane recording.
+  #   THE TOOL IS NO LONGER IN THE SET AS FILES — IT IS IN IT AS A DIGEST. Everything above that
+  #   named a piece of the harness's own CODE (*.py, oracle-config.sh, record.sh, renormalize.sh,
+  #   replay.sh, harness-rev.sh, fleet-fixtures/lib.sh and verdict.sh) used to live beside the data
+  #   it read, so hashing the directory hashed the judge along with the evidence. The judge now ships
+  #   separately and is PINNED by the product, so the pin stands in for all of it: one line that
+  #   moves whenever any of those files does, and that a product cannot change without also changing
+  #   which tool it runs. That is strictly stronger than the old glob, which could only see files it
+  #   happened to be pointed at — a tool upgrade used to be invisible to the rev unless it edited
+  #   something inside this directory.
+  #
+  #   The fallback matters: with no digest supplied, the tool is being run from inside the tree it
+  #   judges (the layout every existing golden was recorded under), so the old file set is hashed
+  #   exactly as before and those recordings stay verifiable.
   local d="${BUSBAR_ORACLE_DATA:-$_hr_here}" f
   (
     LC_ALL=C
-    for f in "$d/cells.json" "$d"/*.py "$d/oracle-config.sh" "$d/record.sh" "$d/renormalize.sh" \
-             "$d/replay.sh" "$d/harness-rev.sh" \
+    if [ -z "${BUSBAR_ORACLE_TOOL_DIGEST:-}" ]; then
+      for f in "$_hr_here"/*.py "$_hr_here/oracle-config.sh" "$_hr_here/record.sh" \
+               "$_hr_here/renormalize.sh" "$_hr_here/replay.sh" "$_hr_here/harness-rev.sh" \
+               "$_hr_here/../fleet-fixtures/lib.sh" "$_hr_here/../fleet-fixtures/verdict.sh" \
+               "$_hr_here/fleet_fixtures/lib.sh" "$_hr_here/fleet_fixtures/verdict.sh"; do
+        [ -f "$f" ] || continue
+        printf '%s\n' "$f"
+      done
+    fi
+    for f in "$d/cells.json" \
              "$d"/scripts/* "$d"/fixtures/*.json "$d/golden-digests.tsv" "$d/plugin-digests.tsv" \
-             "$d/accepted-differences.json" "$d/accepted-gaps.json" "$d/owed-baseline.txt" \
-             "$d/../fleet-fixtures/lib.sh" "$d/../fleet-fixtures/verdict.sh"; do
+             "$d/accepted-differences.json" "$d/accepted-gaps.json" "$d/owed-baseline.txt"; do
       [ -f "$f" ] || continue
       printf '%s\n' "$f"
     done
@@ -117,6 +137,13 @@ harness_rev() {  # sha256 over the exact file set ci.yml's shadow-oracle cache k
   local f repo; repo="$(_hr_repo)"
   (
     LC_ALL=C
+    # THE PINNED TOOL, FIRST AND NAMED. `oracle.pin` is the product's statement of which judge it
+    # runs; folding it in here is what replaces hashing the judge's own files. Named as well as
+    # hashed, for the same reason every other entry is: an absent pin and an empty pin must not
+    # produce the same revision.
+    if [ -n "${BUSBAR_ORACLE_TOOL_DIGEST:-}" ]; then
+      printf 'oracle-tool\n%s\n' "$BUSBAR_ORACLE_TOOL_DIGEST"
+    fi
     _hr_files | while IFS= read -r f; do
       # the REPO-RELATIVE name, so a file outside testing/shadow-oracle (fleet-fixtures/lib.sh) has
       # a stable name in the hash rather than a `../` that depends on where the set is rooted
