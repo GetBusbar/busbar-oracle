@@ -54,8 +54,19 @@ jobs:
           python-version: "3.12"
       - name: install
         run: pip install -e .
+      # THE RECORDER'S OWN INTERPRETER REQUIREMENT, INSTALLED FOR THE SELF-TEST THAT NEEDS IT.
+      # apply-mutation.py parses the config document, so it needs PyYAML; the package deliberately
+      # does not depend on it (see pyproject's `dependencies = []`, and requirements-dev.txt's note).
+      # replay-selftest's mutation-fixture case refuses to skip itself, so without this the job is
+      # red rather than quietly proving nothing.
+      - name: install the dev pins (pyyaml, for the mutation self-test)
+        run: pip install --require-hashes -r requirements-dev.txt
       - name: the entrypoint resolves every shipped driver
         run: busbar-oracle --help
+      - name: apply-mutation's own arms, including the data-dir fixture seam
+        run: busbar-oracle --data tests/fixture-product/data apply-mutation --selftest
+      - name: the merge provenance rule
+        run: busbar-oracle --data tests/fixture-product/data merge --selftest
       # THE FIXTURE PRODUCT. A stub binary with a handful of cells, so the tool's own
       # self-tests need no real product -- the point of the move was that the tool does
       # not know what it is judging.

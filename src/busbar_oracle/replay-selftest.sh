@@ -1344,5 +1344,136 @@ else
   say PASS "SUPERVISOR_MARKERS source not in this tree; marker check skipped"
 fi
 
+# ── (jj) THE TOOL/DATA SEAM ──────────────────────────────────────────────────────────────────────
+# Everything below is about ONE bug class, found by a full linux re-record against v0.2.0 and
+# reproduced locally: a file that belongs to the PRODUCT being resolved against the TOOL, or the
+# other way round. It is a silent class. Nothing about it is visible in this repository, because
+# in-tree the two directories are the same directory and every wrong derivation is accidentally
+# right; it only appears once the tool is installed somewhere else, which is the only way anyone
+# actually runs it. Its cost was 232 FAIL rows reported as busbar regressions.
+#
+# There are three seams and each gets a case that would be red without the fix.
+
+# (jj-1) THE MUTATION FIXTURE IS READ OUT OF THE DATA DIRECTORY. apply-mutation.py's `--fixture`
+# defaulted to `<tool>/fixtures/boot-mutations.json`; the package ships only
+# fixtures/selftest-recording/**, and record.sh passed no --fixture at all, so every `mutation:`
+# cell died with FileNotFoundError. The planted id below exists in NO packaged fixture, so this
+# arm cannot be satisfied by a copy sitting beside the tool.
+#
+# Driven through the file's own --selftest, which owns the case (it needs PyYAML, exactly as a real
+# mutation cell does). PyYAML is not a runtime dependency of this tool and must not become one — the
+# oracle judges a workspace and shares nothing with it — so a host without it says so by name here
+# instead of reporting a green it did not earn.
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+  am_out="$(python3 "${here}/apply-mutation.py" --selftest 2>&1)"; am_rc=$?
+  if [ "$am_rc" = 0 ] && printf '%s' "$am_out" | grep -q "read out of the DATA dir"; then
+    say PASS "apply-mutation.py resolves its mutation fixture against \$BUSBAR_ORACLE_DATA, not against itself"
+  else
+    say FAIL "apply-mutation.py --selftest rc=${am_rc}: $(printf '%s' "$am_out" | grep '^FAIL' | tr '\n' ' ' | cut -c1-300)"
+  fi
+else
+  say FAIL "PyYAML is not importable, so the mutation-fixture case could not run — install it (it is a DEV dependency of this tool and a RUNTIME requirement of any product with mutation cells) rather than letting this read green"
+fi
+
+# (jj-2) AND record.sh NAMES IT RATHER THAN RELYING ON THAT DEFAULT. Two ends that agree by
+# accident agree until one of them moves. Static, because the alternative is recording a cell.
+if grep -q -- '--fixture "\${data}/fixtures/boot-mutations.json"' "${here}/record.sh"; then
+  say PASS "record.sh passes the DATA dir's boot-mutations.json explicitly (the two ends cannot disagree)"
+else
+  say FAIL "record.sh does not pass --fixture, so which mutation inventory a cell is recorded against is decided by a default in another file"
+fi
+
+# (jj-3) THE DRIVER CONTRACT: BUSBAR_ORACLE_TOOL_DIR. The product's cell drivers call TOOL files
+# (capture.py, capture-exec.py, mock-upstream.py, oracle-config.sh, fetch-plugin.sh, fetch-golden.sh)
+# that left the product's tree with the tool. They reach them through this variable. The product's
+# shim exports it; the tool must export it too, or a driver run by `busbar-oracle record` directly
+# falls back to a path beside itself — which is either absent (a broken cell) or a stale in-tree copy
+# (a cell recorded by code nobody pinned). Observed by TRAPPING THE EXIT of a real `source` of each
+# driver, so this reads the value the driver actually exports rather than a line of its text.
+#
+# THE DRIVER'S OWN $0, OR THIS MEASURES NOTHING. Every driver derives `here` from `dirname "$0"`, so
+# a `bash -c '. "$1"' _ <driver>` reads $0 as `_` and the driver locates itself at the CURRENT
+# DIRECTORY — the value that came back was the repository root and the case failed against a
+# correctly-exporting driver. `bash -c <cmd> <name>` sets $0 to <name>, which is exactly the hook
+# needed: the driver sees its real path, sets `here`, exports, and then exits 2 on its own usage
+# check with no arguments — at which point the EXIT trap reports what it exported.
+exported_tool_dir_of() {  # <driver.sh> -> the BUSBAR_ORACLE_TOOL_DIR it exports, or <unset>
+  env -u BUSBAR_ORACLE_TOOL_DIR bash -c '
+    trap '"'"'printf "%s\n" "${BUSBAR_ORACLE_TOOL_DIR:-<unset>}" >&9'"'"' EXIT
+    . "$0"
+  ' "$1" 9>&1 >/dev/null 2>&1
+}
+for drv in record.sh replay.sh; do
+  got_td="$(exported_tool_dir_of "${here}/${drv}" | tail -1)"
+  [ "$got_td" = "$here" ] \
+    && say PASS "${drv} exports BUSBAR_ORACLE_TOOL_DIR=<the installed tool>, so a driver it runs finds the tool's files" \
+    || say FAIL "${drv} exports BUSBAR_ORACLE_TOOL_DIR=${got_td} (wanted ${here}) — a cell driver invoked by the tool directly cannot resolve capture.py/mock-upstream.py/fetch-plugin.sh"
+done
+
+# …and the two halves of the contract are not the same half. A probe that reads a tool file THROUGH
+# the variable must work; the same probe reading it BESIDE ITSELF (the pre-extraction shape, and the
+# `:-$here` fallback every driver still carries) must fail under the shipped layout. Without the
+# second arm the first proves only that some path exists somewhere.
+mkdir -p "$W/tdprobe/scripts"
+cat >"$W/tdprobe/scripts/probe-var.sh" <<'PROBE'
+here="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "${BUSBAR_ORACLE_TOOL_DIR:-$here}/mock-upstream.py" ] || exit 7
+PROBE
+cat >"$W/tdprobe/scripts/probe-beside.sh" <<'PROBE'
+here="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "${here}/mock-upstream.py" ] || exit 7
+PROBE
+BUSBAR_ORACLE_TOOL_DIR="$here" bash "$W/tdprobe/scripts/probe-var.sh"; td_var_rc=$?
+BUSBAR_ORACLE_TOOL_DIR="$here" bash "$W/tdprobe/scripts/probe-beside.sh"; td_beside_rc=$?
+if [ "$td_var_rc" = 0 ] && [ "$td_beside_rc" != 0 ]; then
+  say PASS "a driver that names a tool file through BUSBAR_ORACLE_TOOL_DIR resolves it, and one that names it beside itself does not (so the variable is load-bearing, not decorative)"
+else
+  say FAIL "the driver contract proves nothing here: through-the-variable rc=${td_var_rc} (want 0), beside-itself rc=${td_beside_rc} (want non-zero — if this is 0 the tool and the drivers are in one directory and neither arm is testing the shipped layout)"
+fi
+
+# (jj-4) THE VERDICT HALF READS THE PRODUCT'S CELL LIST BY DEFAULT. `busbar-oracle diff` without
+# --cells defaulted to `<tool>/cells.json`, a file an installed tool does not ship — so the one
+# subcommand that IS the verdict crashed when run directly. replay.sh always passes --cells, which
+# is precisely why nobody saw it. Run with only BUSBAR_ORACLE_DATA set, and required to agree with
+# the same run that names the file.
+dd_out="$W/dd-default"; dd_exp="$W/dd-explicit"
+BUSBAR_ORACLE_DATA="$data" python3 "${here}/diff-cells.py" --golden "$FIX" --candidate "$W/same" \
+  --out "$dd_out" --accepted "$W/no-accept.json" --allow-harness-skew >"$W/dd-default.log" 2>&1
+dd_rc=$?
+python3 "${here}/diff-cells.py" --golden "$FIX" --candidate "$W/same" --out "$dd_exp" \
+  --cells "${data}/cells.json" --accepted "$W/no-accept.json" --allow-harness-skew >"$W/dd-explicit.log" 2>&1
+dd_rc2=$?
+if [ "$dd_rc" = "$dd_rc2" ] && [ -f "$dd_out/report.json" ] && [ -f "$dd_exp/report.json" ] \
+   && cmp -s "$dd_out/report.json" "$dd_exp/report.json"; then
+  say PASS "diff without --cells reads \$BUSBAR_ORACLE_DATA/cells.json and produces the same report as naming it"
+else
+  say FAIL "diff without --cells does not read the data dir's cell list (rc=${dd_rc} vs ${dd_rc2}): $(tail -3 "$W/dd-default.log" | tr '\n' ' ' | cut -c1-300)"
+fi
+
+# (jj-5) AND NO SHIPPED FILE GOES BACK TO DERIVING A DATA PATH FROM ITSELF. The four cases above are
+# each about one file; this is about the class. Every name below is a PRODUCT file — none of them is
+# shipped by this package — so a default that joins one to the tool's own directory is the bug,
+# whichever file grows it next. Written as a scan rather than a list of known offenders because the
+# whole lesson of this round is that the offender is always the file nobody thought to check.
+data_names='cells\.json|accepted-differences\.json|accepted-gaps\.json|owed-baseline\.txt|golden-digests\.tsv|plugin-digests\.tsv|boot-mutations\.json|rigs-baseline\.json'
+seam_bad=""
+for f in "${here}"/*.py; do
+  [ -f "$f" ] || continue
+  # a data file joined to __file__'s directory, on one line — the exact shape all three defects had
+  if grep -nE "(dirname\(os\.path\.abspath\(__file__\)\)|\bHERE\b|\b_HERE\b)[^#]*(${data_names})" "$f" \
+       | grep -v '^\s*#' | grep -q .; then
+    seam_bad="${seam_bad} $(basename "$f")"
+  fi
+done
+for f in "${here}"/*.sh; do
+  [ -f "$f" ] || continue
+  if grep -nE "\\\$\{?here\}?/(${data_names})" "$f" | grep -q .; then
+    seam_bad="${seam_bad} $(basename "$f")"
+  fi
+done
+[ -z "$seam_bad" ] \
+  && say PASS "no shipped file resolves a PRODUCT data file against the tool's own directory" \
+  || say FAIL "shipped file(s) resolve a product data file against the tool's own directory, which is only ever right in-tree:${seam_bad}"
+
 echo
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }

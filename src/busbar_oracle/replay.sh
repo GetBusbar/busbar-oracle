@@ -34,6 +34,11 @@ data="${BUSBAR_ORACLE_DATA:-$here}"
 # The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
 # inside that product; it is now shipped separately, so the root is passed in.
 repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
+# WHERE THE TOOL ITSELF IS — the same contract record.sh states at length. A driver (or a
+# re-normalization this replay drives) reaches the tool's own files through this variable, never by
+# a path beside itself, and it is exported here as a DEFAULT so the contract does not depend on
+# having come in through the product's shim.
+export BUSBAR_ORACLE_TOOL_DIR="${BUSBAR_ORACLE_TOOL_DIR:-$here}"
 
 GOLDEN="" CAND="" OUT="" CELLS="${data}/cells.json" FAMILY="" ACCEPTED="${data}/accepted-differences.json"
 ALLOW_SKEW=0 BASELINE="${data}/owed-baseline.txt" ACCEPTED_GAPS="${data}/accepted-gaps.json" REBASELINE=0 CHECK_GOLDEN=1

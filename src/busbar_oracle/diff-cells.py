@@ -55,6 +55,20 @@ import re
 import sys
 from collections import Counter, defaultdict
 
+# THE CELL LIST AND THE REGISTER ARE THE PRODUCT'S DATA, NOT THE TOOL'S.
+#
+# `--cells` and `--accepted` defaulted to `<tool>/cells.json` and `<tool>/accepted-differences.json`,
+# which was right only while the tool sat inside the product it judges. An installed tool ships
+# neither file, so `busbar-oracle diff` without `--cells` read a path that does not exist. replay.sh
+# always passes both, which is exactly why this went unnoticed: the seam is only visible to someone
+# running the verdict half directly, and what they got was a traceback rather than the verdict.
+#
+# They now default to the DATA directory — the one place cells.json, the registers, the owed
+# baseline, the digest pins and the drivers all live — with the tool's own directory as the fallback
+# for the in-tree layout (BUSBAR_ORACLE_DATA unset).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("BUSBAR_ORACLE_DATA") or _HERE
+
 CLASS_ORDER = ["missing.golden", "missing.candidate", "status", "headers", "body", "effects.stderr",
                "effects.usage", "effects.usage_after_restart", "effects.store_errors",
                "effects.metrics", "effects.audit", "norm.rules", "effects.egress", "effects.readback",
@@ -424,13 +438,16 @@ def main() -> int:
     ap.add_argument("--golden", required=True)
     ap.add_argument("--candidate", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--cells", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cells.json"))
+    ap.add_argument("--cells", default=os.path.join(DATA, "cells.json"),
+                    help="the product's cell list. Default: $BUSBAR_ORACLE_DATA/cells.json")
     ap.add_argument("--family", default="")
     ap.add_argument("--id-filter", default="",
                     help="regex over cell IDs (the same domain as record.sh --filter); only matching cells are owed and compared")
     ap.add_argument("--strict", action="store_true",
                     help="exit 1 when any owed cell diverges without an accepted entry or is missing from the candidate")
-    ap.add_argument("--accepted", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "accepted-differences.json"))
+    ap.add_argument("--accepted", default=os.path.join(DATA, "accepted-differences.json"),
+                    help="the product's register of forgiven divergences. "
+                         "Default: $BUSBAR_ORACLE_DATA/accepted-differences.json")
     ap.add_argument("--allow-harness-skew", action="store_true",
                      help="proceed even if golden and candidate were produced by different (or unrecorded) "
                           "testing/shadow-oracle revisions; without this the differ refuses to compare them")

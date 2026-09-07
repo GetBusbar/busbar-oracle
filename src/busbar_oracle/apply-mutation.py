@@ -79,6 +79,25 @@ except ImportError:  # pragma: no cover
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# THE FIXTURE IS THE PRODUCT'S DATA. THIS FILE IS THE TOOL.
+#
+# `--fixture` used to default to `<tool>/fixtures/boot-mutations.json`, which was right for exactly
+# as long as the tool lived inside the product it judges. It does not any more: the PACKAGE ships
+# only `fixtures/selftest-recording/**` (see pyproject's package-data), and boot-mutations.json is a
+# statement about the PRODUCT's boot surface that travels with the product's data directory. So the
+# default resolved to a path that does not exist in an installed tool, `record.sh` passed no
+# `--fixture`, and every `mutation:` cell died with FileNotFoundError. Measured on a full linux
+# re-record against v0.2.0: 232 FAIL rows (195 boot.refusal, 31 boot.warning, 7 neutrality,
+# 4 documented) — a whole plane of the corpus, reported as a product regression.
+#
+# The default is now the DATA dir's copy, i.e. the same directory cells.json, the registers, the
+# digest pins and the cell drivers come out of, and record.sh passes it EXPLICITLY as well so the
+# two cannot disagree about which fixture a recording was made against. The HERE fallback stays for
+# the in-tree layout every existing golden was recorded under: with BUSBAR_ORACLE_DATA unset, the
+# tool is sitting inside the product and the old path is the right one.
+DATA = os.environ.get("BUSBAR_ORACLE_DATA") or HERE
+BOOT_MUTATIONS = os.path.join(DATA, "fixtures", "boot-mutations.json")
+
 
 def _fetch_plugin(repo: str) -> str:
     """Resolve the cached, digest-verified tarball path for a plugin-digests.tsv repo name, fetching
@@ -275,7 +294,7 @@ def selftest() -> int:
 
     # every shipped delete must still find its key in the shipped baseline: this is the regression
     # that would otherwise only surface as a green cell proving nothing.
-    fxp = os.path.join(HERE, "fixtures", "boot-mutations.json")
+    fxp = BOOT_MUTATIONS
     if os.path.exists(fxp):
         shipped = json.load(open(fxp, encoding="utf-8"))
         dels = [(m["id"], op) for m in shipped["mutations"] if m.get("op")
@@ -284,6 +303,54 @@ def selftest() -> int:
             d = json.loads(json.dumps(base))
             say(walk_delete(d, op["delete"]) == [],
                 f"{mid}: delete {op['delete']!r} still matches the baseline shape")
+
+    # THE FIXTURE COMES OUT OF THE DATA DIRECTORY, NOT OUT OF THE TOOL. A subprocess, because the
+    # default is computed from the environment at import and the point of the case is what a
+    # FRESHLY LAUNCHED apply-mutation.py resolves — which is how record.sh runs it.
+    #
+    # The planted mutation id exists in NO packaged fixture, so an arm that passes could not have
+    # read one: if this file ever goes back to defaulting at its own directory, the first assertion
+    # is red rather than accidentally satisfied by a same-named mutation shipped beside the tool.
+    w2 = tempfile.mkdtemp(prefix="apply-mutation-datadir.")
+    try:
+        os.makedirs(os.path.join(w2, "fixtures"))
+        planted = "SELFTEST-DATA-DIR-ONLY-b3f1"
+        with open(os.path.join(w2, "fixtures", "boot-mutations.json"), "w", encoding="utf-8") as f:
+            json.dump({"mutations": [{"id": planted, "op": [{"delete": "auth.signing_key"}]}]}, f)
+        cfg2, prov2 = os.path.join(w2, "config.yaml"), os.path.join(w2, "providers.yaml")
+        open(cfg2, "w").write(yaml.safe_dump(base))
+        open(prov2, "w").write("providers: {}\n")
+
+        def run_planted(env_data):
+            env = dict(os.environ)
+            if env_data is None:
+                env.pop("BUSBAR_ORACLE_DATA", None)
+            else:
+                env["BUSBAR_ORACLE_DATA"] = env_data
+            out = os.path.join(w2, "out-" + ("data" if env_data else "here"))
+            shutil.rmtree(out, ignore_errors=True)
+            r = subprocess.run([sys.executable, os.path.abspath(__file__),
+                                "--baseline", cfg2, "--providers", prov2,
+                                "--mutation", planted, "--out", out],
+                               capture_output=True, text=True, env=env)
+            return r, out
+
+        r, out = run_planted(w2)
+        wrote = os.path.exists(os.path.join(out, "config.yaml")) and "signing_key" not in \
+            (yaml.safe_load(open(os.path.join(out, "config.yaml"), encoding="utf-8")) or {}).get("auth", {})
+        say(r.returncode == 0 and wrote,
+            "with BUSBAR_ORACLE_DATA set, a mutation with no --fixture is read out of the DATA dir's "
+            f"fixtures/boot-mutations.json (rc={r.returncode}, stderr={r.stderr.strip()[:160]!r})")
+
+        # …and the same call with the variable unset must NOT find it. Without this the case above
+        # would still pass if the default were BOTH paths tried in turn — which is the shape that
+        # lets a stale fixture beside the tool silently decide what a cell records.
+        r2, _ = run_planted(None)
+        say(r2.returncode != 0,
+            "with BUSBAR_ORACLE_DATA unset, the same mutation is NOT found beside the tool "
+            f"(rc={r2.returncode}) — the default moved, it was not widened")
+    finally:
+        shutil.rmtree(w2, ignore_errors=True)
 
     print(f"\napply-mutation selftest: {'GREEN' if not fails else f'RED ({fails} failing)'}")
     return 1 if fails else 0
@@ -297,9 +364,23 @@ def main() -> int:
     ap.add_argument("--providers", required=True)
     ap.add_argument("--mutation", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--fixture", default=os.path.join(HERE, "fixtures", "boot-mutations.json"))
+    ap.add_argument("--fixture", default=BOOT_MUTATIONS,
+                    help="the product's boot-mutation inventory. Default: "
+                         "$BUSBAR_ORACLE_DATA/fixtures/boot-mutations.json (the tool's own directory "
+                         "only when that variable is unset, i.e. the in-tree layout)")
     a = ap.parse_args()
-    fx = json.load(open(a.fixture, encoding="utf-8"))
+    try:
+        fx = json.load(open(a.fixture, encoding="utf-8"))
+    except FileNotFoundError:
+        # NAMED, NOT A TRACEBACK. record.sh reads exit 2 as "the tool failed" and exit 3 as "this
+        # mutation declares itself unavailable"; a FileNotFoundError traceback landed in the cell's
+        # stderr and every mutation cell became a FAIL whose detail was a Python stack. Say which
+        # path was tried and where the default came from, so the next person reads the seam.
+        print(f"apply-mutation: no mutation fixture at {a.fixture} "
+              f"(BUSBAR_ORACLE_DATA={os.environ.get('BUSBAR_ORACLE_DATA') or '<unset>'}); "
+              f"boot-mutations.json is the PRODUCT's data, not the tool's — pass --fixture or set "
+              f"BUSBAR_ORACLE_DATA to the directory that holds it", file=sys.stderr)
+        return 2
     mut = next((m for m in fx["mutations"] if m["id"] == a.mutation), None)
     if mut is None:
         print(f"apply-mutation: no mutation {a.mutation}", file=sys.stderr); return 2

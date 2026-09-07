@@ -35,6 +35,18 @@ data="${BUSBAR_ORACLE_DATA:-$here}"
 # The PRODUCT this oracle judges. `<tool>/../..` was only ever right while the tool lived
 # inside that product; it is now shipped separately, so the root is passed in.
 repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${here}/../.." && pwd)}"
+# THE THIRD LOCATION: WHERE THE TOOL ITSELF IS. The product's cell DRIVERS (the data dir's
+# scripts/*.sh) call files that ship with the TOOL — capture.py, capture-exec.py, mock-upstream.py,
+# oracle-config.sh, fetch-plugin.sh, fetch-golden.sh — and those left the product's tree when the
+# oracle was extracted. A driver cannot find them beside itself any more, and it must not: a stale
+# in-tree copy that happened to still be there would silently decide what a cell records.
+#
+# So drivers say `${BUSBAR_ORACLE_TOOL_DIR:-$here}/<file>`, and the variable is the contract. The
+# product's shim exports it; this exports it too, as a DEFAULT rather than an override, so a driver
+# works identically whether the tool was invoked by the product's shim or directly. Without this
+# line the contract held only on the shim's path, which is the one place it is easy to test and the
+# last place it breaks. (See the driver contract in the README.)
+export BUSBAR_ORACLE_TOOL_DIR="${BUSBAR_ORACLE_TOOL_DIR:-$here}"
 # shellcheck source=../fleet-fixtures/lib.sh
 source "${repo}/testing/fleet-fixtures/lib.sh"
 # shellcheck source=oracle-config.sh
@@ -513,7 +525,16 @@ record_exec_cell() {  # <id> <cell-json> <raw-dir> <safe>
       # to be a gap the owner accepted rather than one the recorder could not run, it is owed by
       # nobody, and on a host without PyYAML all 242 `mutation:` cells go that way at once — on both
       # binaries, agreeing, with nothing red anywhere. Exit 3 keeps the SKIP; anything else is FAIL.
+      # THE FIXTURE IS NAMED HERE, NOT LEFT TO A DEFAULT. boot-mutations.json is the PRODUCT'S
+      # inventory of boot mutations and lives in the data directory; apply-mutation.py used to
+      # default to a copy beside ITSELF, which the installed package does not ship, and this call
+      # site passed nothing — so every `mutation:` cell died with a FileNotFoundError traceback and
+      # went into the ledger as a FAIL about busbar (232 rows on a linux re-record against v0.2.0).
+      # Both ends now name the data dir, so the recorder and the tool cannot disagree about which
+      # inventory a cell was recorded against, and a missing fixture is one loud error rather than
+      # a plane of red cells.
       python3 "${here}/apply-mutation.py" --baseline "$WORK/config.yaml" --providers "$WORK/providers.yaml" \
+        --fixture "${data}/fixtures/boot-mutations.json" \
         --mutation "${cfg#mutation:}" --out "$xwork" >"$xwork/mutation.env" 2>"$xwork/mutation.err"
       local mut_rc=$?
       if [ "$mut_rc" = 3 ]; then
