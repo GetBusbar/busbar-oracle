@@ -122,8 +122,23 @@ fi
 
 mkdir -p "$OUT"
 export LEDGER="${OUT}/ledger.tsv"; : >"$LEDGER"
-# shellcheck source=../fleet-fixtures/lib.sh
-source "${repo}/testing/fleet-fixtures/lib.sh"
+# THE LEDGER MACHINERY IS THE TOOL'S, AND ONLY THE PRODUCT'S WHEN THE PRODUCT HAS ONE. `record` and
+# the verdict were sourced out of `${repo}/testing/fleet-fixtures/` unconditionally, which was the
+# only true statement while the judge lived inside busbar. Shipped separately, `$repo` is whatever
+# the caller named with --product-root — and a run that names no product at all (the tool judging a
+# fixture, which is the whole point of the extraction) resolved it to the TOOL'S OWN grandparent,
+# where no such directory exists. `source` then failed, `record` was not defined, every owed row was
+# written by a command that did not exist, and this script exited 127 with an empty ledger. The
+# package already ships fleet_fixtures/lib.sh and verdict.sh for exactly this reason — harness-rev.sh
+# has looked in both places since the extraction — so resolve them the same way here.
+# The PRODUCT'S copy still wins where there is one: an in-tree layout must keep sourcing the file
+# its recordings were made under, not a shipped copy that may have moved on.
+_fleet() {  # _fleet <basename> -> the path to source/run, product's copy first
+  if [ -f "${repo}/testing/fleet-fixtures/$1" ]; then printf '%s\n' "${repo}/testing/fleet-fixtures/$1"
+  else printf '%s\n' "${here}/fleet_fixtures/$1"; fi
+}
+# shellcheck source=fleet_fixtures/lib.sh
+source "$(_fleet lib.sh)"
 
 diff_args=(--golden "$GOLDEN" --candidate "$CAND" --out "$OUT" --cells "$CELLS" --accepted "$ACCEPTED")
 [ -z "$FAMILY" ] || diff_args+=(--family "$FAMILY")
@@ -235,7 +250,7 @@ OWED="$(<"${OUT}/owed.txt")"
 echo
 echo "golden gaps (recorded SKIP/FAIL on the golden, not owed): $(wc -l <"${OUT}/owed-gaps.txt" | tr -d ' ')"
 GATE_NAME="shadow oracle vs golden" EXPECTED_IDS="${OWED}
-${baseline_ids}" LEDGER="$LEDGER" bash "${repo}/testing/fleet-fixtures/verdict.sh"
+${baseline_ids}" LEDGER="$LEDGER" bash "$(_fleet verdict.sh)"
 rc=$?
 echo "report: ${OUT}/report.md"
 exit $rc
