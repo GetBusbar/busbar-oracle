@@ -22,6 +22,7 @@ and both default to the old derivation so an in-tree layout still works.
 
 Subcommands map one-to-one onto the shipped drivers:
 
+  cells         enumerate-cells.py        derive a product's cell list from its own data module
   record        record.sh                 run a product's cells, write a recording
   replay        replay.sh                 judge a candidate recording against a golden
   diff          diff-cells.py             the verdict itself (replay's judging half)
@@ -61,6 +62,7 @@ COMMANDS = {
     "apply-mutation": "apply-mutation.py",
     "build-request": "build-request.py",
     "capture": "capture.py",
+    "cells": "enumerate-cells.py",
     "fixture-gate-selftest": "fixture-gate-selftest.sh",
 }
 
