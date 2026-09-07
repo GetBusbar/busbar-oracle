@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: busbar-oracle
-Version: 0.1.0
+Version: 0.2.1
 Summary: A shadow oracle: record a released binary's exact behaviour per cell, and replay it against any later one.
 Author: Busbar Inc and contributors
 License: Apache-2.0
@@ -74,6 +74,70 @@ project that still keeps the oracle inside its own tree needs neither flag.
 
 Every other flag is passed through to the underlying driver unchanged.
 
+## The tool/data seam
+
+There are exactly two kinds of file in play, and every path in this tool resolves
+against one of them:
+
+| kind | lives in | examples |
+|---|---|---|
+| **tool** | the installed package | `record.sh`, `replay.sh`, `capture.py`, `capture-exec.py`, `normalize.py`, `diff-cells.py`, `mock-upstream.py`, `oracle-config.sh`, `fetch-plugin.sh`, `fetch-golden.sh` |
+| **data** | `--data` / `$BUSBAR_ORACLE_DATA` | `cells.json`, `cells/`, `golden/`, `scripts/`, `fixtures/*.json`, `accepted-differences.json`, `accepted-gaps.json`, `owed-baseline.txt`, `golden-digests.tsv`, `plugin-digests.tsv`, `oracle.pin` |
+
+**A product file is never resolved against the tool's own directory.** That
+derivation was right only while the oracle lived inside the product it judged; in
+an installed tool it names a path that does not exist, and the failure is not loud
+— it arrives as a plane of red cells that look like a product regression. Three
+defaults had it (`apply-mutation.py --fixture`, `diff-cells.py --cells/--accepted`,
+`merge-recordings.py --cells`); all three now default to `$BUSBAR_ORACLE_DATA/…`
+and fall back to the tool's directory only when that variable is unset, which is
+the in-tree layout every existing golden was recorded under. `replay-selftest`
+scans the shipped files for the shape and is red if it comes back.
+
+### The driver contract
+
+A product's cell drivers (`$BUSBAR_ORACLE_DATA/scripts/*.sh`) are **data** — they
+belong to the product and the tool never ships them. They do, however, call tool
+files: `capture.py`, `capture-exec.py`, `mock-upstream.py`, `oracle-config.sh`,
+`fetch-plugin.sh`, `fetch-golden.sh`. Those files are not beside the driver any
+more and must not be looked for there — a stale in-tree copy that happened to
+survive would silently decide what a cell records.
+
+So a driver reaches them through **`BUSBAR_ORACLE_TOOL_DIR`**, the absolute path of
+the installed package directory:
+
+```sh
+here="$(cd "$(dirname "$0")/.." && pwd)"          # the DATA dir (this driver's product)
+python3 "${BUSBAR_ORACLE_TOOL_DIR:-$here}/capture.py"  … # a TOOL file, through the variable
+tarball="$(bash "${BUSBAR_ORACLE_TOOL_DIR:-$here}/fetch-plugin.sh" store-sqlite)"
+```
+
+`record.sh` and `replay.sh` export the variable themselves (as a default, never an
+override), so a driver behaves identically whether it was reached through a
+product's own shim or by running `busbar-oracle record` directly. The `:-$here`
+fallback is for the in-tree layout only.
+
+### What the harness revision covers, and how
+
+`harness-rev` is the answer to "was this golden made and judged by the same thing
+that is making and judging now?", and it covers **everything that decides a
+verdict** — but the two kinds are covered by two different mechanisms, on purpose:
+
+- the **tool** by its *digest*: `$BUSBAR_ORACLE_TOOL_DIGEST` (`tag@sha256`, which the
+  consuming product's shim sets from its pin) is folded into the revision as one
+  line. A tool upgrade therefore moves the rev exactly once, by a route the product
+  cannot change without also changing which tool it runs.
+- the **data** by *hashing*: every file in the table above is hashed, names as well
+  as bytes, including the product's committed `oracle.pin` — so a pin bump is a data
+  change with a name, visible to `busbar-oracle harness-rev --files`, to a `git
+  diff`, and to the hash.
+
+Hashing the tool's files *as well* would state which judge ran twice, by two routes
+that can disagree; hashing them *instead* would miss a tool upgrade that edited
+nothing in the data directory. One statement, one route. When no digest is supplied
+the tool is running from inside the tree it judges, and the old file glob is hashed
+exactly as before, so recordings made under that layout stay verifiable.
+
 ## Subcommands
 
 | command | driver | does |
@@ -131,10 +195,19 @@ golden/candidate pair before the script is deleted.
 busbar-oracle selftest                 # the recorder/normalizer/differ's own arms
 busbar-oracle fixture-gate-selftest    # both arms of the fixture gate
 busbar-oracle replay-selftest          # the judge, against a fixture recording
+busbar-oracle apply-mutation --selftest # the mutation applier, incl. the data-dir fixture seam
+busbar-oracle merge --selftest         # the merge provenance rule
 ```
 
 These run against the tiny fixture product in `tests/fixture-product/` and need no
 real binary, so the tool is testable in this repository alone.
+
+`apply-mutation --selftest` is the one that needs **PyYAML** — a boot mutation is
+applied to the parsed config document. It is pinned in `requirements-dev.txt` and
+deliberately *not* a runtime dependency: `pyproject.toml`'s `dependencies` stays
+empty so the oracle can be installed into an environment that shares nothing with
+the workspace it judges. A product with `mutation:` cells provides PyYAML in the
+interpreter that runs the recorder.
 
 ## Versioning
 
