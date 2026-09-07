@@ -112,8 +112,8 @@ def _stage_plugin_dir_unsigned(out_dir: str, repos: list) -> str:
     is now wrong. Returns the absolute plugins dir path. tarfile round-trip preserves member order
     and names; only manifest.json's bytes change (and therefore the .tar.gz's compressed bytes, but
     never its members)."""
-    import tarfile
     import io
+    import tarfile
 
     plugins_dir = os.path.join(out_dir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)

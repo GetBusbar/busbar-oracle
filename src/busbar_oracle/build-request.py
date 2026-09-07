@@ -126,7 +126,9 @@ def request_for(cell: dict) -> dict:
 # hash — so sign the real body with the current time.
 def sigv4_headers(method: str, path: str, body: bytes, host: str, akid: str, secret: str,
                   region: str = "us-east-1", service: str = "bedrock") -> dict:
-    import datetime, hashlib, hmac
+    import datetime
+    import hashlib
+    import hmac
     now = datetime.datetime.now(datetime.timezone.utc)
     amzdate, datestamp = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
     payload_hash = hashlib.sha256(body).hexdigest()

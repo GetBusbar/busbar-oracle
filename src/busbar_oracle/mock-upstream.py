@@ -69,8 +69,8 @@ import os
 import sys
 import threading
 import time
-from urllib.parse import unquote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 MARKER = "oracle-marker"
 IN_TOK, OUT_TOK = 11, 7
@@ -231,8 +231,10 @@ def cohere_stream(model, marker):
 # Mirrors crates/busbar-substrate/src/eventstream.rs `encode_frame` byte-for-byte: a real CRC32 (a
 # native AWS SDK decoder validates both checksums), so the frames this mock emits are indistinguishable
 # on the wire from a genuine Bedrock ConverseStream response.
-import struct
-import zlib
+# Imported here rather than at the top because this block is a self-contained transcription of one
+# Rust file and is read against it; the two names it needs travel with it.
+import struct  # noqa: E402
+import zlib  # noqa: E402
 
 
 def _eventstream_header(name, value):
@@ -472,7 +474,7 @@ class H(BaseHTTPRequestHandler):
         if not ctl_file or not os.path.exists(ctl_file):
             return None
         try:
-            with open(ctl_file, "r") as f:
+            with open(ctl_file) as f:
                 return f.read().strip()
         except OSError:
             return None

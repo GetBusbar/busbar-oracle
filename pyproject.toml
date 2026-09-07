@@ -56,4 +56,14 @@ select = ["E", "F", "W", "I", "UP", "B"]
 ignore = [
   "E501",   # long lines are load-bearing prose in the norm rules
   "UP038",
+  # E701/E702: `if x: return`, and `a = 1; b = 2` for values that are one thought. This is the
+  # pervasive, deliberate register of the recorder and the differ — 82 occurrences across six files
+  # that came out of busbar's tree years into their life — and it sits beside the long-form comments
+  # this config already declines to reflow. The lint job was added by the extraction and selected a
+  # rule set nobody had ever run against this code; reformatting six judging scripts to satisfy a
+  # style preference is a large diff over files whose exact behaviour decides whether a release
+  # shipped a regression. Ruled out as style, not silenced case by case, so the decision is in one
+  # place and reversible. `ruff format --check` is advisory in ci.yml for the same reason.
+  "E701",
+  "E702",
 ]
