@@ -45,6 +45,21 @@ oracle_protocol() {  # <dialect>
 }
 
 oracle_write_config() {  # <work> <listen_port> <admin_port> <mock_port>
+  # THE DIRECTORY WRITTEN AND THE DIRECTORY BOOTED FROM MUST BE THE SAME ONE. This function writes
+  # config.yaml and providers.yaml under `$1`; `oracle_env` and `oracle_spawn` below boot busbar
+  # with BUSBAR_CONFIG="${WORK}/config.yaml". Nothing tied the two together — the pair worked only
+  # because every shipped driver happens to `export WORK="$W"` before calling with the same `$W`.
+  # A driver that passes a different directory, or forgets the export, writes a config here and
+  # boots busbar against a STALE OR ABSENT one there, then records whatever that binary answers as
+  # the cell's contract. Both binaries would agree, so the golden freezes it.
+  #
+  # So the two are bound: WORK follows the directory the config was written to, and a caller whose
+  # WORK already names somewhere else is told rather than quietly served the wrong config.
+  if [ -n "${WORK:-}" ] && [ "${WORK}" != "$1" ]; then
+    echo "oracle_write_config: refusing to write the config to '$1' while WORK='${WORK}' — oracle_env and oracle_spawn boot busbar from \$WORK, so this run would write one config and boot another" >&2
+    return 2
+  fi
+  export WORK="$1"
   # A fresh config means a fresh overlay: the runtime overlay file the previous variant's admin
   # writes left beside config.yaml (a hook registered under the hooks variant, say) must not leak
   # into the next boot, where the plugin dir it names is no longer configured.
@@ -380,6 +395,29 @@ oracle_fixture_missing() {  # <needs_fixture value> -> 0 gap | 1 record | 2 malf
 if [ "${BASH_SOURCE[0]}" = "${0}" ] && [ "${1:-}" = "--selftest" ]; then
   _oc_fails=0
   _oc() { printf '%s  %s\n' "$1" "$2"; [ "$1" = PASS ] || _oc_fails=$((_oc_fails+1)); }
+
+  # ── THE CONFIG IS WRITTEN WHERE BUSBAR IS BOOTED FROM ─────────────────────────────────────────
+  # oracle_write_config writes to its `$1`; oracle_env/oracle_spawn boot from `$WORK`. Nothing bound
+  # the two, and the pair was correct only because every shipped driver happens to export WORK to
+  # the same directory it passes. A driver that does not writes one config and boots another, and
+  # records that binary's answer as the cell's contract.
+  _oc_w1="$(mktemp -d)"; _oc_w2="$(mktemp -d)"
+  # The binding is asserted regardless of whether the write itself completes: this selftest has no
+  # busbar binary, so --generate-signing-key inside the function fails and it returns 1. WHERE it
+  # decided to write is the question, and that is decided before any of that.
+  ( unset WORK; oracle_write_config "$_oc_w1" 1 2 3 >/dev/null 2>&1; [ "${WORK:-}" = "$_oc_w1" ] ) \
+    && _oc PASS "oracle_write_config binds WORK to the directory it wrote, so oracle_env boots the config that was just written" \
+    || _oc FAIL "oracle_write_config left WORK pointing somewhere other than the directory it wrote"
+  # Asserted on the SPECIFIC refusal (status 2 and a message naming both directories), not merely on
+  # "it did not return 0": with no busbar binary this function returns 1 from --generate-signing-key
+  # whatever it decides, so a test that only checked for non-zero would pass with the guard removed.
+  _oc_err="$( ( export WORK="$_oc_w2"; oracle_write_config "$_oc_w1" 1 2 3 >/dev/null ) 2>&1 )"; _oc_rc=$?
+  if [ "$_oc_rc" = 2 ] && case "$_oc_err" in *"$_oc_w1"*"$_oc_w2"*) true ;; *) false ;; esac; then
+    _oc PASS "oracle_write_config refuses, by name, to write to a directory that is not the one busbar will boot from"
+  else
+    _oc FAIL "oracle_write_config wrote to one directory while WORK named another (rc=${_oc_rc}) — busbar would boot a config this call did not write"
+  fi
+  rm -rf "$_oc_w1" "$_oc_w2"
 
   # A COMPLETE MINT IS TAKEN, FIELD FOR FIELD.
   if _oracle_take_mint t "$(printf 'vk_abc\037bbk_secret\037AKIA1\037wow')" 2>/dev/null \

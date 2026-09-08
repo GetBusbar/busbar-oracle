@@ -57,6 +57,15 @@ W="$(mktemp -d "${TMPDIR:-/tmp}/oracle-replay-selftest.XXXXXX")"
 trap 'rm -rf "$W"' EXIT
 fails=0
 say() { printf '%s  %s\n' "$1" "$2"; [ "$1" = PASS ] || fails=$((fails+1)); }
+# A CASE THAT COULD NOT RUN IS NOT A CASE THAT PASSED. Two cases below depend on files that are only
+# present when the tool is run against a real product tree, and they reported PASS when those files
+# were absent — the vacuous-green shape this file refuses everywhere else ("a static case that can
+# pass vacuously is worse than no case"). `skip` says so out loud, does not count toward GREEN, and
+# is counted in the summary so a run that proved less than it looks is visible from the last line.
+skips=0
+skipped=""
+skip() { printf 'SKIP  %s\n' "$1"; skips=$((skips+1)); skipped="${skipped}
+  - $1"; }
 # The fixture's meta.json predates harness_rev, so every structural case below (a-g) needs
 # --allow-harness-skew just to get past the provenance check; (l)/(m) test that check itself.
 # It also names no `binary_sha256` — it was made by no released binary — so the cases below say
@@ -565,16 +574,40 @@ sd_n=0
 for f in "$sd"/*.sh; do [ -f "$f" ] && sd_n=$((sd_n + 1)); done
 [ "$sd_n" -gt 0 ] \
   || say FAIL "the data directory has no scripts/*.sh, so the two static driver guards below are looking at nothing and would report PASS over an empty set"
+# THE TRIGGER WAS A LITERAL DIGIT, AND THE CHECK WAS A WHOLE-FILE GREP. Both let a give-up through:
+#   * `fail "$rc" "busbar did not come up"` does not match `fail[[:space:]]+[0-9]`, so the driver was
+#     skipped by `continue` and never asked for the marker at all.
+#   * a driver whose OWN fail() writes harness_error (most of them) satisfied a file-wide grep no
+#     matter what any OTHER give-up path in the same file wrote — e.g. an inline
+#     `printf '{"status":2,…,"effects":{}}' >"$RAW/captured.json"; exit 0` on a boot timeout, which
+#     record.sh read as "this cell is exit 2" with a PASS row behind it.
+# So: the trigger accepts a variable status too, and every WRITE of captured.json that is not the
+# cell's own result must be reachable from a give-up that marks itself. That last part cannot be
+# decided by grep in general, so what is checked is the shape that is decidable and that covers the
+# real hazard: a driver that writes captured.json with a non-negative literal `status` inline (not
+# through its fail()/gap() helpers) and no harness_error on that line.
 missing_he=""
+inline_giveup=""
 for f in "$sd"/*.sh; do
   [ -f "$f" ] || continue
-  # does this driver ever call fail with a status other than -1? (`fail -1 …` is the named-gap shape)
-  grep -Eq '(^|[^-[:alnum:]_])fail[[:space:]]+[0-9]' "$f" || continue
-  grep -q 'harness_error' "$f" || missing_he="${missing_he} $(basename "$f")"
+  # does this driver ever call fail with a status other than -1? (`fail -1 …` is the named-gap
+  # shape). A literal digit, "$var", ${var} or $var all count: the give-up is the same either way.
+  if grep -Eq '(^|[^-[:alnum:]_])fail[[:space:]]+([0-9]|"?\$)' "$f"; then
+    grep -q 'harness_error' "$f" || missing_he="${missing_he} $(basename "$f")"
+  fi
+  # an inline write of a non-negative status into captured.json, on a line that does not mark itself
+  while IFS= read -r ln; do
+    case "$ln" in *harness_error*) continue ;; esac
+    inline_giveup="${inline_giveup} $(basename "$f")"
+    break
+  done < <(grep -nE '"status"[[:space:]]*:[[:space:]]*[0-9]' "$f" | grep -F 'captured.json')
 done
 [ -z "$missing_he" ] \
-  && say PASS "every script driver that fails with a non-negative status marks it harness_error" \
+  && say PASS "every script driver that fails with a non-negative status — literal or variable — marks it harness_error" \
   || say FAIL "script driver(s) fail with a non-negative status and NO harness_error, so record.sh writes a PASS row over a harness failure:${missing_he}"
+[ -z "$inline_giveup" ] \
+  && say PASS "no script driver writes a non-negative status into captured.json inline without marking it" \
+  || say FAIL "script driver(s) write a captured.json with a literal non-negative status on a line that does not mark harness_error, so a give-up written outside fail() is recorded as the contract:${inline_giveup}"
 
 # (x) A DRIVER MUST NOT PUT A WALL CLOCK IN `effects`. Since diff-cells.py grew `effects.script`,
 # EVERY effects key a driver writes is compared, and rated MONEY. A raw `date +%s` (or a store column
@@ -598,8 +631,20 @@ done
 # the baseline is a cell that can silently stop being owed later with nothing to catch it: exactly
 # the regression owed-baseline.txt exists to make impossible. (`http.crosscut|413|gemini-path` was
 # such a cell.) Only checked when the real golden is present in the tree.
+#
+# AND AN EMPTY BASELINE IS THE FINDING, NOT A REASON TO SKIP. This `if` had no `else`: with
+# owed-baseline.txt truncated to zero bytes — a bad merge, a botched regeneration, or a deliberate
+# `: > owed-baseline.txt` to quiet a red row — replay.sh owes nothing from it, no cell can produce
+# an owed-baseline regression row, case (j)'s red arm can never fire in production, and THIS case
+# said nothing at all while the file printed GREEN. Every ratchet the floor file provides would be
+# gone and both the gate and its own selftest silent about it. The file's own rule, three cases
+# above: "a static case that can pass vacuously is worse than no case".
 GOLD="${data}/golden/1.5.5"
-if [ -s "${GOLD}/ledger.tsv" ] && [ -s "${data}/owed-baseline.txt" ]; then
+if [ ! -s "${GOLD}/ledger.tsv" ]; then
+  skip "the owed ratchet: ${data}/golden/1.5.5/ledger.tsv is not in this tree (a tool-only run has no golden to measure the baseline against)"
+elif [ ! -s "${data}/owed-baseline.txt" ]; then
+  say FAIL "the golden owes $(awk -F'\t' '$2=="PASS"{n++} END{print n+0}' "${GOLD}/ledger.tsv") PASS cell(s) and ${data}/owed-baseline.txt is absent or EMPTY — the ratchet that stops the golden quietly ceasing to owe a cell has nothing in it, so no cell can ever produce an owed-baseline regression row"
+else
   awk -F'\t' '$2=="PASS"{print $1}' "${GOLD}/ledger.tsv" | LC_ALL=C sort -u >"$W/gold-pass.txt"
   grep -v '^[[:space:]]*$' "${data}/owed-baseline.txt" | LC_ALL=C sort -u >"$W/base.txt"
   unowed="$(comm -23 "$W/gold-pass.txt" "$W/base.txt" | tr '\n' ' ')"
@@ -1408,7 +1453,7 @@ if [ -f "$src" ]; then
     && say PASS "record.sh unsets every SUPERVISOR_MARKER the binary reads ($(tr '\n' ' ' <<<"$want"))" \
     || say FAIL "record.sh does not unset: $(tr '\n' ' ' <<<"$missing") (host would pick the restart arm)"
 else
-  say PASS "SUPERVISOR_MARKERS source not in this tree; marker check skipped"
+  skip "record.sh vs SUPERVISOR_MARKERS: the Rust source naming them is not in this tree, so the one case that would notice record.sh no longer unsetting INVOCATION_ID cannot run"
 fi
 
 # ── (jj) THE TOOL/DATA SEAM ──────────────────────────────────────────────────────────────────────
@@ -1535,21 +1580,35 @@ done
 # the variable must work; the same probe reading it BESIDE ITSELF (the pre-extraction shape, and the
 # `:-$here` fallback every driver still carries) must fail under the shipped layout. Without the
 # second arm the first proves only that some path exists somewhere.
+#
+# THE SECOND ARM HAS TO RESOLVE SOMEWHERE REAL. It used to run out of `$W/tdprobe`, a directory this
+# selftest creates and into which no mock-upstream.py is ever written, so `td_beside_rc` was 7
+# unconditionally — it would have "passed" with the extraction reverted and the drivers sitting
+# beside the tool again. The probe now resolves beside the PRODUCT'S OWN drivers ($data/scripts),
+# which is where a real driver's `$here/..` lands, so the arm measures the shipped layout instead of
+# an empty temp dir. In an in-tree layout (data dir and tool dir are one) both arms resolve and
+# there is nothing to prove — said out loud rather than reported as a pass.
 mkdir -p "$W/tdprobe/scripts"
 cat >"$W/tdprobe/scripts/probe-var.sh" <<'PROBE'
 here="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "${BUSBAR_ORACLE_TOOL_DIR:-$here}/mock-upstream.py" ] || exit 7
 PROBE
-cat >"$W/tdprobe/scripts/probe-beside.sh" <<'PROBE'
-here="$(cd "$(dirname "$0")/.." && pwd)"
-[ -f "${here}/mock-upstream.py" ] || exit 7
-PROBE
 BUSBAR_ORACLE_TOOL_DIR="$here" bash "$W/tdprobe/scripts/probe-var.sh"; td_var_rc=$?
-BUSBAR_ORACLE_TOOL_DIR="$here" bash "$W/tdprobe/scripts/probe-beside.sh"; td_beside_rc=$?
-if [ "$td_var_rc" = 0 ] && [ "$td_beside_rc" != 0 ]; then
-  say PASS "a driver that names a tool file through BUSBAR_ORACLE_TOOL_DIR resolves it, and one that names it beside itself does not (so the variable is load-bearing, not decorative)"
+# beside-itself, against the real data dir: `$here/..` from $data/scripts/<driver> is $data
+if [ -f "${data}/mock-upstream.py" ]; then
+  td_beside_rc=0    # in-tree: the tool IS the data dir, so both arms resolve (see below)
 else
-  say FAIL "the driver contract proves nothing here: through-the-variable rc=${td_var_rc} (want 0), beside-itself rc=${td_beside_rc} (want non-zero — if this is 0 the tool and the drivers are in one directory and neither arm is testing the shipped layout)"
+  td_beside_rc=7
+fi
+if [ "${data}" = "${here}" ] || [ -f "${data}/mock-upstream.py" ]; then
+  skip "the driver contract's beside-itself arm: this run's data dir (${data}) also holds the tool's files, so both arms resolve and only the shipped layout could tell them apart"
+fi
+if [ "$td_var_rc" = 0 ] && [ "$td_beside_rc" != 0 ]; then
+  say PASS "a driver that names a tool file through BUSBAR_ORACLE_TOOL_DIR resolves it, and one that names it beside itself (the product's own scripts/ dir) does not — so the variable is load-bearing, not decorative"
+elif [ "$td_var_rc" = 0 ]; then
+  say PASS "a driver that names a tool file through BUSBAR_ORACLE_TOOL_DIR resolves it (the beside-itself arm cannot discriminate in this layout — see the SKIP above)"
+else
+  say FAIL "a driver cannot resolve a tool file through BUSBAR_ORACLE_TOOL_DIR at all (rc=${td_var_rc}), so every driver that names capture.py/mock-upstream.py/fetch-plugin.sh through it is broken"
 fi
 
 # (jj-4) THE VERDICT HALF READS THE PRODUCT'S CELL LIST BY DEFAULT. `busbar-oracle diff` without
@@ -1834,4 +1893,5 @@ grep -q "OO-1 body wording" "$W/out-oo-a.log" \
   || say FAIL "no entry was named when the register loaded, so the narrowing is silent"
 
 echo
-[ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }
+[ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
+[ "$fails" -eq 0 ] && echo "replay selftest: GREEN${skips:+ (with $skips skipped)}" || { echo "replay selftest: RED ($fails)"; exit 1; }
