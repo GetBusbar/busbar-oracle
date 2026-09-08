@@ -589,6 +589,118 @@ grep -qi "kind=breaking\|additive" "$W/out-qq5.log" && msg_ok=1 || msg_ok=0
   && say PASS "an additive entry naming 'status' is refused at load" \
   || say FAIL "QQ-5 additive-naming-status was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-qq5.log)"
 
+# (rr) `text_list_growth` — THE SAME PROOF FOR A LIST NAMED IN PROSE, NOT JSON. admin.ops's
+# DeleteOverlaySection|not-found and the boot-refusal config cells (P20/P29/P30) name their enum as
+# a backtick-quoted comma list inside a sentence, on `body`/`effects.stderr` — there is no JSON
+# structure for additive_superset() to walk. `text_list_growth: true` proves the SAME growth by
+# splicing golden's own list text back into the candidate: if what remains is not byte-identical to
+# golden, the difference was never just the list.
+rr_cells() {  # <out> — self|b|stream reclassified onto a BODY_IS_CONTRACT family, like boot.refusal
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|b|stream":
+        c["family"] = "boot.refusal"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+rr_cells "$W/rr-cells.json"
+cat >"$W/rr-accept.json" <<'JSON'
+{"accepted":[{"id":"RR-1 refusal list growth","kind":"additive","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["body"],"changelog":"selftest: config refusal enum grows additively","rationale":"selftest: text_list_growth proof","text_list_growth":true}]}
+JSON
+rr_body() {  # <out-cell-json> <text>
+  python3 - "$1" "$2" <<'EOF'
+import json, sys
+p, t = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d["body"] = {"text": t}
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+RR_GOLDEN='unknown overlay section `limits`: expected `groups`, `hooks`, `root`, or `plugin_versions`'
+cp -R "$FIX" "$W/rr-golden"
+rr_body "$W/rr-golden/cells/self__b__stream.json" "$RR_GOLDEN"
+
+rr_run() {  # <label> <candidate-text> <want: accept|reject> <needle>
+  local label="$1" ctext="$2" want="$3" needle="$4"
+  rm -rf "$W/rr-cand"; cp -R "$FIX" "$W/rr-cand"
+  rr_body "$W/rr-cand/cells/self__b__stream.json" "$ctext"
+  rm -rf "$W/out-rr"
+  bash "${here}/replay.sh" --golden "$W/rr-golden" --candidate "$W/rr-cand" --out "$W/out-rr" --cells "$W/rr-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$W/rr-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-rr.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-rr/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  if [ "$want" = accept ]; then
+    if [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$diff_col" == *"$needle"* ]]; then
+      say PASS "$label"
+    else
+      say FAIL "$label (rc=$rc status=$status_col title=$title_col diff='$diff_col')"
+    fi
+  else
+    if [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$needle"* ]]; then
+      say PASS "$label"
+    else
+      say FAIL "$label (rc=$rc status=$status_col diff='$diff_col')"
+    fi
+  fi
+}
+
+# (rr1) pure appended items -> ACCEPTED, naming the items.
+rr_run "text_list_growth accepts pure appended items, naming them" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, `agents`' \
+  accept "additive: added identity-providers, export, tools, agents"
+
+# (rr2) the template word changed ("expected" -> "expected one of") ALONGSIDE the growth -> RED,
+# naming the first differing byte -- the real admin.ops|DeleteOverlaySection|not-found shape.
+rr_run "text_list_growth refuses a reworded template beside real growth, naming the first differing byte" \
+  'unknown overlay section `limits`: expected one of `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, `agents`' \
+  reject "additive: not a superset at text byte"
+
+# (rr3) an item REMOVED from the golden's list -> RED.
+rr_run "text_list_growth refuses a removed item" \
+  'unknown overlay section `limits`: expected `groups`, `root`, or `plugin_versions`' \
+  reject "additive: not a superset at list item"
+
+# (rr4) an item INSERTED mid-list (not appended at the end) -> RED.
+rr_run "text_list_growth refuses an item inserted mid-list" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `NEW`, `root`, or `plugin_versions`' \
+  reject "additive: not a superset at list item"
+
+# (rr5) growth in TWO separate backtick lists in the same text -> RED, saying why: one declared
+# list per entry keeps the check narrow.
+rr_run_two_lists() {
+  rm -rf "$W/rr-golden2" "$W/rr-cand2"
+  cp -R "$FIX" "$W/rr-golden2"; cp -R "$FIX" "$W/rr-cand2"
+  rr_body "$W/rr-golden2/cells/self__b__stream.json" \
+    'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, or `plugin_versions` in file `a`, `b`, or `c`'
+  rr_body "$W/rr-cand2/cells/self__b__stream.json" \
+    'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers` in file `a`, `b`, `c`, `d`'
+  bash "${here}/replay.sh" --golden "$W/rr-golden2" --candidate "$W/rr-cand2" --out "$W/out-rr5" --cells "$W/rr-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$W/rr-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-rr5.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-rr5/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"more than one backtick list"* ]] \
+    && say PASS "text_list_growth refuses growth in TWO lists at once (one declared list per entry keeps the check narrow)" \
+    || say FAIL "growth-in-two-lists was not red-with-reason: rc=$rc status=$status_col diff='$diff_col'"
+}
+rr_run_two_lists
+
+# (rr6) `effects.stderr` is refused at load without `text_list_growth: true` -- there is no
+# JSON-superset relation for a raw string, so naming it bare would be a silent no-op acceptance.
+cat >"$W/rr6-accept.json" <<'JSON'
+{"accepted":[{"id":"RR-6 bad stderr additive","kind":"additive","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["effects.stderr"],"changelog":"x","rationale":"y"}]}
+JSON
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$FIX" --out "$W/out-rr6" --cells "$W/rr-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/rr6-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-rr6.log" 2>&1
+rc=$?
+grep -qi "text_list_growth" "$W/out-rr6.log" && msg_ok=1 || msg_ok=0
+[ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
+  && say PASS "an additive entry naming 'effects.stderr' without text_list_growth is refused at load" \
+  || say FAIL "RR-6 bare-stderr-additive was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-rr6.log)"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
