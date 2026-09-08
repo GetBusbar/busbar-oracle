@@ -862,11 +862,214 @@ status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
   && say PASS "leaf text_list_growth refuses growth in two lists inside one leaf" \
   || say FAIL "leaf two-lists-in-one-leaf was not red-with-reason: rc=$rc status=$status_col diff='$diff_col'"
 
-# (ss6) TWO DIFFERENT LEAVES differ (message grew its list AND hint changed) -> RED, naming BOTH
-# JSON pointers -- one leaf's own story is never enough to explain a second leaf moving too.
-ss_run "two differing string leaves are refused together, naming both paths" \
+# (ss6) TWO DIFFERENT LEAVES differ (message grew its list AND hint changed) -> STILL RED, and
+# since 0.3.9 for the RIGHT reason: `/error/message` IS growth and is proved, `/hint` is a
+# rewording that is not growth in any list, so the cell is refused naming `/hint` and what is wrong
+# with it. THE VERDICT DOES NOT MOVE; the MESSAGE does. Through 0.3.8 this read "text_list_growth
+# found more than one differing string leaf: /error/message, /hint" — a refusal about the COUNT of
+# leaves that moved, which is true of a document that grew the same fact in three places just as
+# much as of this one. A reader could not tell those apart, and the fix for each is different.
+ss_run "a second leaf that is NOT growth still refuses the cell, naming that leaf and its own reason" \
   'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, or `identity-providers`' \
-  "see the docs" reject "more than one differing string leaf: /error/message, /hint"
+  "see the docs" reject "additive: not a superset at /hint (not a superset at text byte 4 (no backtick or pipe list found))"
+
+# (vv) EVERY GROWN LEAF, NOT ONE SLOT (0.3.9). One release-note-worthy fact can be written down in
+# several leaves of the SAME body, and 0.3.8 refused exactly that for the COUNT of leaves that moved
+# ("text_list_growth found more than one differing string leaf: …") rather than for anything any one
+# of them said. THE REAL CELL IS `admin.ops|GetOpenapiJson|ok`: 1.5.5's document states the overlay
+# section enum in THREE prose leaves of the DELETE `/api/v1/admin/overlay/{section}` operation and
+# its view schema —
+#   /paths//api/v1/admin/overlay/{section}/delete/summary                    "(section ∈ groups|hooks|root|plugin_versions)"
+#   /paths//api/v1/admin/overlay/{section}/delete/responses/400/description  "(expected `groups`|`hooks`|`root`|`plugin_versions`)"
+#   /components/schemas/OverlayResetView/properties/reset/description        "(`groups` | `hooks` | `root` | `plugin_versions`)"
+# — and 1.6.0 grows that enum by the four sections it added (`identity-providers`, `export`, `tools`,
+# `agents`). The golden texts below are 1.5.5's recorded bytes; the summary's candidate is 1.6.0's
+# own string, verbatim. THE OTHER TWO CANDIDATES ARE WRITTEN IN THEIR GOLDEN'S OWN SPELLING, and
+# that is a claim about busbar rather than about this tool: 1.6.0 as it stands ALSO rewrote those two
+# templates (the 400 line moved from `` `a`|`b` `` to "expected one of `a`, `b`", the reset line
+# stopped restating the set at all), and a template rewrite is refused here whatever else it did —
+# (vv4) below pins that on the byte-exact real pair. The three-leaf GREEN is what the register entry
+# F-011c buys once those two leaves merely GROW; until then F-011c has to name them under
+# `description_corrections` instead, which (vv5) pins.
+vv_cells() {  # <out> — self|a|ok reclassified onto a BODY_IS_CONTRACT family, like admin.ops
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = "admin.ops"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+vv_cells "$W/vv-cells.json"
+# The three leaves, written into the fixture body at the pointers the real document uses.
+vv_doc() {  # <cell-json> <summary> <400-description> <reset-description> [<409-description>]
+  python3 - "$1" "$2" "$3" "$4" "${5:-}" <<'EOF'
+import json, sys
+p, summary, d400, reset, d409 = sys.argv[1:6]
+d = json.load(open(p))
+op = {"summary": summary, "responses": {"400": {"description": d400}}}
+if d409:
+    op["responses"]["409"] = {"description": d409}
+d["body"]["json"]["paths"] = {"/api/v1/admin/overlay/{section}": {"delete": op}}
+d["body"]["json"]["components"] = {"schemas": {"OverlayResetView": {"properties": {"reset": {"description": reset}}}}}
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+VV_SUMMARY_G="DISCARD a section's overlay mutations and revert it to base config.yaml (section ∈ groups|hooks|root|plugin_versions). Per-section reset: the OTHER sections' overlay survives. A NEW config version; an already-empty section is an idempotent no-op (changed:false)"
+VV_SUMMARY_C="DISCARD a section's overlay mutations and revert it to base config.yaml (section ∈ groups|hooks|root|plugin_versions|identity-providers|export|tools|agents). Per-section reset: the OTHER sections' overlay survives. A NEW config version; an already-empty section is an idempotent no-op (changed:false)"
+VV_400_G='`invalid_request`: unknown overlay section (expected `groups`, `hooks`, `root`, or `plugin_versions`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed'
+VV_400_C='`invalid_request`: unknown overlay section (expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed'
+VV_RESET_G='The section that was reset (`groups`, `hooks`, `root`, or `plugin_versions`).'
+VV_RESET_C='The section that was reset (`groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`).'
+VV_P_SUMMARY='/paths//api/v1/admin/overlay/{section}/delete/summary'
+VV_P_400='/paths//api/v1/admin/overlay/{section}/delete/responses/400/description'
+VV_P_409='/paths//api/v1/admin/overlay/{section}/delete/responses/409/description'
+VV_P_RESET='/components/schemas/OverlayResetView/properties/reset/description'
+cat >"$W/vv-accept.json" <<'JSON'
+{"accepted":[{"id":"F-011c overlay sections grow in every leaf that names them","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body"],"changelog":"selftest: the overlay section enum gains identity-providers, export, tools, agents","rationale":"selftest: N grown leaves, each proved as a set","text_list_growth":true}]}
+JSON
+
+vv_run() {  # <label> <accept-json> <want> <cand-summary> <cand-400> <cand-reset> [<needle>...]
+  local label="$1" acc="$2" want="$3" csum="$4" c400="$5" creset="$6"; shift 6
+  rm -rf "$W/vv-golden" "$W/vv-cand" "$W/out-vv"
+  cp -R "$FIX" "$W/vv-golden"; cp -R "$FIX" "$W/vv-cand"
+  vv_doc "$W/vv-golden/cells/self__a__ok.json" "$VV_SUMMARY_G" "$VV_400_G" "$VV_RESET_G"
+  vv_doc "$W/vv-cand/cells/self__a__ok.json"   "$csum" "$c400" "$creset"
+  bash "${here}/replay.sh" --golden "$W/vv-golden" --candidate "$W/vv-cand" --out "$W/out-vv" --cells "$W/vv-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$acc" --baseline "$W/no-baseline.txt" >"$W/out-vv.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  local ok=1 n
+  for n in "$@"; do [[ "$diff_col" == *"$n"* ]] || ok=0; done
+  if [ "$want" = accept ]; then
+    [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [ "$ok" = 1 ] \
+      && say PASS "$label" || say FAIL "$label (rc=$rc status=$status_col title=$title_col diff='$diff_col')"
+  else
+    [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [ "$ok" = 1 ] \
+      && say PASS "$label" || say FAIL "$label (rc=$rc status=$status_col diff='$diff_col')"
+  fi
+}
+
+# (vv1) THREE leaves, all three grown by the same four sections -> ACCEPTED, and the row names EVERY
+# one of them with its own path and its own added items. RED under 0.3.8 ("more than one differing
+# string leaf"), which is the whole reason this release exists.
+# AND THE THREE LEAVES ARE NOT ALL SPELLED THE SAME WAY, deliberately: the summary's run is BARE
+# PIPE (`section ∈ groups|hooks|root|plugin_versions`) and the other two are BACKTICK-QUOTED comma
+# runs. A generalisation that widened only the COUNT while assuming one run-kind per BODY would pass
+# a single-spelling document and still refuse this one, which is the document the release is for. The
+# kind is decided per LEAF, by `find_text_lists` reading that leaf's own text, and the
+# same-spelling-on-both-sides rule stays a per-leaf rule too — (vv6) is its red half.
+vv_run "N grown leaves of MIXED run kinds (one bare-pipe, two backtick) are each proved and each named" "$W/vv-accept.json" accept \
+  "$VV_SUMMARY_C" "$VV_400_C" "$VV_RESET_C" \
+  "added identity-providers, export, tools, agents at $VV_P_SUMMARY" \
+  "added identity-providers, export, tools, agents at $VV_P_400" \
+  "added identity-providers, export, tools, agents at $VV_P_RESET"
+
+# (vv2) ONE of the three leaves DROPS a golden item while the other two grow correctly -> RED, and
+# the refusal names THAT leaf and the item, by its position in the golden's list. Proving N leaves
+# is not proving them more cheaply: each one is held to the whole 0.3.8 set relation.
+vv_run "a dropped item in ONE of N leaves refuses the cell, naming that leaf and the item" "$W/vv-accept.json" reject \
+  "$VV_SUMMARY_C" '`invalid_request`: unknown overlay section (expected `groups`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed' \
+  "$VV_RESET_C" \
+  "additive: not a superset at $VV_P_400 (not a superset at list item 1 ('hooks' is in the golden's list and not in the candidate's))"
+
+# (vv3) a leaf that changed in ANY OTHER WAY still reds naming it -- here 1.6.0's REAL replacement
+# for the reset description, which stops restating the set instead of growing it. The other two
+# leaves are perfect growth and do not rescue it.
+vv_run "a leaf that is not growth at all refuses the cell, naming that leaf" "$W/vv-accept.json" reject \
+  "$VV_SUMMARY_C" "$VV_400_C" \
+  "The section that was reset. This endpoint's \`section\` path parameter enumerates the valid set; it is deliberately not restated here." \
+  "additive: not a superset at $VV_P_RESET"
+
+# (vv6) …AND THE SPELLING RULE IS PER LEAF TOO. Two leaves grow correctly in their own kinds, and the
+# third one RESPELLS: golden's backtick-quoted comma run comes back as a bare-pipe run with the same
+# items plus the new ones. That is a template change wherever it happens, and the fact that its
+# NEIGHBOURS are honest growth of the same enum must not launder it — the cell is red, naming the
+# leaf that respelled and saying which two kinds were paired. This is the case that would go green if
+# the run kind were decided once for the body instead of once per leaf.
+vv_run "a leaf that RESPELLED its list refuses the cell even when the other leaves grew honestly" "$W/vv-accept.json" reject \
+  "$VV_SUMMARY_C" '`invalid_request`: unknown overlay section (expected groups|hooks|root|plugin_versions|identity-providers|export|tools|agents), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed' \
+  "$VV_RESET_C" \
+  "additive: not a superset at $VV_P_400 (text_list_growth paired a backtick list with a pipe list"
+
+# (vv4) THE BYTE-EXACT REAL PAIR. 1.5.5's recorded texts against 1.6.0's own source strings, all four
+# leaves verbatim: the summary GROWS (bare-pipe run, provable), and the other three do not -- the 400
+# line changed spelling as well as growing, the reset line stopped naming the set, and the 409 line
+# gained a whole new clause. 0.3.8 refused this for the leaf COUNT and said nothing about which leaf
+# was wrong; 0.3.9 names each failing leaf with its own reason, which is the list of things busbar
+# has to decide about before `admin.ops|GetOpenapiJson|ok` can be green on the tool's proof alone.
+rm -rf "$W/vv4-golden" "$W/vv4-cand" "$W/out-vv4"
+cp -R "$FIX" "$W/vv4-golden"; cp -R "$FIX" "$W/vv4-cand"
+VV4_400_G='`invalid_request`: unknown overlay section (expected `groups`|`hooks`|`root`|`plugin_versions`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed'
+VV4_400_C='`invalid_request`: unknown overlay section (expected one of `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, `agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed'
+VV4_RESET_G='The section that was reset (`groups` | `hooks` | `root` | `plugin_versions`).'
+VV4_RESET_C="The section that was reset. This endpoint's \`section\` path parameter enumerates the valid set; it is deliberately not restated here, because the hand-written copy that used to sit on this line went stale the moment a section was added."
+VV4_409_G='`version_conflict`: stale `If-Match` (re-read and retry)'
+VV4_409_C='`conflict`: another config section still references this definition by bare name (remove the reference first) | `version_conflict`: stale `If-Match` (re-read and retry)'
+vv_doc "$W/vv4-golden/cells/self__a__ok.json" "$VV_SUMMARY_G" "$VV4_400_G" "$VV4_RESET_G" "$VV4_409_G"
+vv_doc "$W/vv4-cand/cells/self__a__ok.json"   "$VV_SUMMARY_C" "$VV4_400_C" "$VV4_RESET_C" "$VV4_409_C"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv4-cand" --out "$W/out-vv4" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv4.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv4/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] \
+  && [[ "$diff_col" == *"$VV_P_400"* ]] && [[ "$diff_col" == *"$VV_P_409"* ]] && [[ "$diff_col" == *"$VV_P_RESET"* ]] \
+  && [[ "$diff_col" != *"$VV_P_SUMMARY"* ]] \
+  && say PASS "the real GetOpenapiJson pair names every leaf that is NOT growth, and does not name the one that is" \
+  || say FAIL "VV-4 real openapi pair was not red-naming-each-leaf: rc=$rc status=$status_col diff='$diff_col'"
+
+# (vv7) THE THIRD SPELLING, PINNED AS THE BLOCKER IT IS. 1.5.5's real 400 line joins BACKTICK-QUOTED
+# items with PIPES — `` (expected `groups`|`hooks`|`root`|`plugin_versions`) `` — and that is a run
+# NEITHER rule reads: the backtick rule wants `, ` / ` or ` / `, or ` between items, and the pipe
+# rule's item is a bare word (backticks are excluded from it, so an unparenthesised run cannot
+# swallow the sentence around it). So even a candidate that ONLY GROWS that list, in the golden's own
+# spelling, with nothing else on the line touched and the other two leaves growing honestly, is RED —
+# and red for the SPELLING, not for anything the message stopped saying. This release generalises the
+# leaf COUNT and the transform ORDER and deliberately adds no third spelling, so this is the one
+# remaining thing between `admin.ops|GetOpenapiJson|ok` and a green proved on growth alone. Pinned
+# here so that whichever way it is closed — busbar spelling that line the way it spells the other
+# two, or a later release learning the backtick-pipe run — the change shows up as this case moving.
+rm -rf "$W/vv7-cand" "$W/out-vv7"
+cp -R "$FIX" "$W/vv7-cand"
+vv_doc "$W/vv7-cand/cells/self__a__ok.json" "$VV_SUMMARY_C" \
+  '`invalid_request`: unknown overlay section (expected `groups`|`hooks`|`root`|`plugin_versions`|`identity-providers`|`export`|`tools`|`agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed' \
+  "$VV4_RESET_G" "$VV4_409_G"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv7-cand" --out "$W/out-vv7" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv7.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv7/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$VV_P_400"* ]] && [[ "$diff_col" == *"no backtick or pipe list found"* ]] \
+  && [[ "$diff_col" != *"$VV_P_SUMMARY"* ]] \
+  && say PASS "the real 400 line's backtick-PIPE spelling is read by neither rule, so even PURE growth in it is red -- naming that leaf alone" \
+  || say FAIL "VV-7 backtick-pipe spelling was not red-with-that-reason: rc=$rc status=$status_col diff='$diff_col'"
+
+# (vv5) …AND THE ESCAPE HATCH IS CLOSED FOR THIS DOCUMENT, WHICH THE TOOL SAYS AT LOAD RATHER THAN
+# BY FORGIVING NOTHING. The obvious way to make (vv4) green without changing busbar is to declare the
+# three rewritten leaves as `description_corrections`. That cannot be written today, and NOT for a
+# reason about policy: `additive_superset` builds a leaf's path by joining keys with `/`, so an
+# OpenAPI `paths` key — which IS a URL and contains slashes — yields
+# `/paths//api/v1/admin/overlay/{section}/…`, and `resolve_json_pointer` splits that back on `/` into
+# segments that no longer name anything. The pointer resolves nowhere, and the load-time guard
+# introduced in 0.3.6 (a correction may only name a path that IS a string in some golden) refuses the
+# ENTRY rather than letting it sit there covering nothing. That refusal is the correct outcome of the
+# two rules meeting and it is pinned here so it stays visible: it is exactly why F-011c cannot buy
+# `admin.ops|GetOpenapiJson|ok` with declarations, and why the leaves have to GROW (case vv1) for
+# that cell to be green on the tool's own proof.
+cat >"$W/vv5-accept.json" <<JSON
+{"accepted":[{"id":"F-011c overlay sections (rewrites declared)","kind":"additive","by":"selftest","cells":"^self\\\\|a\\\\|ok\$","expected_cells":1,"classes":["body"],"changelog":"selftest: the overlay section enum gains identity-providers, export, tools, agents","rationale":"selftest: declaring the rewritten leaves instead of proving them","text_list_growth":true,"description_corrections":["$VV_P_400","$VV_P_409","$VV_P_RESET"]}]}
+JSON
+rm -rf "$W/out-vv5"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv4-cand" --out "$W/out-vv5" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv5-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv5.log" 2>&1
+rc=$?
+grep -q "not a string leaf" "$W/out-vv5.log" && msg_ok=1 || msg_ok=0
+[ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
+  && say PASS "a description_corrections pointer under an OpenAPI 'paths' key resolves nowhere and is refused AT LOAD, never silently covering nothing" \
+  || say FAIL "VV-5 slash-bearing correction pointer was not refused at load: rc=$rc msg_ok=$msg_ok (see $W/out-vv5.log)"
 
 # (tt) `description_corrections` — A NAMED LEAF MAY DIFFER OUTRIGHT, NO GROWTH PROOF NEEDED, BECAUSE
 # THE REGISTER SAYS SO EXPLICITLY. Unlike `text_list_growth` (which proves growth mechanically),
@@ -2697,6 +2900,141 @@ pp_run() {  # <case>
 pp_run P20
 pp_run P29
 pp_run P30
+
+# (ww) A REWRITE THE REGISTER ALREADY NAMED IS NOT A SECOND THING THE LINE CHANGED (0.3.9). The
+# three cells above are the ones this repo has been chasing since 0.3.4, and the texts (pp) compares
+# are the real ones WITH THE DIAGNOSTIC-CODE PREFIX TAKEN OFF BY HAND — a courtesy that hides the
+# actual shape of the cell. What busbar really records is a candidate whose `[error]` line carries
+# `BUSBAR-3015: ` (D-1, the register's line-precise diagnostic-code transform, which has covered
+# these families since 1.6.0 started stamping codes) AND whose limit-metric enum on that same line
+# grew by the four token metrics. Through 0.3.8 NOTHING could take that cell:
+#   * `transform` alone is credited only when the REWRITTEN PAIR IS BYTE-IDENTICAL, and it is not —
+#     the list grew, so D-1 fires and the cell still reports a real effects.stderr divergence;
+#   * `additive` alone saw the raw pair, where the prefix is one more thing that moved, and refused
+#     it as a template change ("not a superset at text byte N");
+#   * and the two kinds could not be combined, because an `additive` entry carrying a `transform`
+#     was REFUSED AT LOAD ("use one register kind or the other").
+#   * splitting it across two entries cannot express it either: both changes are on the SAME line,
+#     so each entry would have to forgive the other's difference to be credited for its own.
+# 0.3.9 applies the entry's own transform to BOTH sides first and runs the growth proof on the
+# rewritten pair. The four cases below are the same three real BOOT-P texts as (pp), with D-1's real
+# pattern and the real code busbar stamps on this line.
+ww_stderr() {  # <cell-json> <case> <side> <variant: grown|dropped>
+  python3 - "$1" "$2" "$3" "$4" <<'EOF'
+import json, sys
+p, case, side, variant = sys.argv[1:5]
+WARN = ("[warn] BUSBAR_PROVIDERS is DEPRECATED; set `providers_file:` in config.yaml instead "
+        "(it is honored for now).\n")
+FRAME = "[error] config.yaml: invalid YAML: groups.broke.limits[0]: "
+# THE ONE THING THAT MAKES THIS DIFFERENT FROM (pp): 1.6.0's own line carries the code, and the
+# golden's does not. D-1's transform is what the register already says about that.
+CODE = "BUSBAR-3015: "
+TAIL = " at line 27 column 7\n"
+TEXT = {
+  ("P20", "golden"):
+    "a limit needs exactly one metric key (requests | tokens | budget | concurrent)",
+  ("P20", "candidate"):
+    "a limit needs exactly one metric key (requests | tokens | tokens_input | tokens_output | "
+    "tokens_cache_read | tokens_cache_write | budget | concurrent)",
+  ("P29", "golden"):
+    "unknown field `bogus`, expected one of `requests`, `tokens`, `budget`, `concurrent`, `per`, "
+    "`pool`, `on_exhaust`, `downgrade_to`",
+  ("P29", "candidate"):
+    "unknown field `bogus`, expected one of `requests`, `tokens`, `tokens_input`, `tokens_output`, "
+    "`tokens_cache_read`, `tokens_cache_write`, `budget`, `concurrent`, `per`, `pool`, "
+    "`on_exhaust`, `downgrade_to`",
+  ("P30", "golden"):
+    "invalid type: string \"requests\", expected a limit map "
+    "`{ <metric>: <amount>, per: <window>, pool: <name> }` where <metric> is one of "
+    "requests|tokens|budget|concurrent and <window> one of minute|hour|day|month|total "
+    "(omit `per` for concurrent; `pool` is optional and scopes the limit to one pool's traffic)",
+  ("P30", "candidate"):
+    "invalid type: string \"requests\", expected a limit map "
+    "`{ <metric>: <amount>, per: <window>, pool: <name> }` where <metric> is one of "
+    "requests|tokens|tokens_input|tokens_output|tokens_cache_read|tokens_cache_write|budget|"
+    "concurrent and <window> one of minute|hour|day|month|total "
+    "(omit `per` for concurrent; `pool` is optional and scopes the limit to one pool's traffic)",
+}
+text = TEXT[(case, side)]
+if side == "candidate" and variant == "dropped":
+    # the same grown list, MINUS a golden item: the growth proof's first refusal, and it must still
+    # fire with the transform in play. `budget` is in every one of the three lists, in that list's
+    # own spelling.
+    for tok in ("budget | ", "`budget`, ", "budget|"):
+        if tok in text:
+            text = text.replace(tok, "", 1)
+            break
+    else:
+        raise SystemExit(f"ww_stderr: no `budget` to drop in {case}")
+frame = FRAME if side == "golden" else "[error] " + CODE + FRAME[len("[error] "):]
+d = json.load(open(p))
+d.setdefault("effects", {})["stderr"] = WARN + frame + text + TAIL
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+# THE REGISTER ENTRY THE REAL CELLS NEED: F-013's own scope and changelog line, `kind: additive` with
+# `text_list_growth: true` as it has carried since 0.3.6, PLUS D-1's real transform verbatim.
+cat >"$W/ww-accept.json" <<'JSON'
+{"accepted":[{"id":"WW-1 F-013 under a stamped diagnostic code","kind":"additive","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["effects.stderr"],"changelog":"selftest: validation messages know the new limit metrics","rationale":"selftest: additive + transform + text_list_growth on the three real BOOT-P cells","text_list_growth":true,"transform":{"candidate":[["^(\\[error\\]|\\[warn\\]|warning:) BUSBAR-\\d{4}: ","\\1 "]]}}]}
+JSON
+# the same entry with the transform REMOVED — the 0.3.8 register, unchanged, for the red-before-green.
+cat >"$W/ww-notransform-accept.json" <<'JSON'
+{"accepted":[{"id":"WW-2 F-013 without the transform","kind":"additive","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["effects.stderr"],"changelog":"selftest: validation messages know the new limit metrics","rationale":"selftest: additive alone, the way 0.3.8 had to write it","text_list_growth":true}]}
+JSON
+# …and the same transform as an ordinary `improvement`, which is the OTHER half of the old dilemma.
+cat >"$W/ww-transform-only-accept.json" <<'JSON'
+{"accepted":[{"id":"WW-3 the transform alone","kind":"improvement","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["effects.stderr"],"rationale":"selftest: a transform is credited only when the rewritten pair is byte-identical","transform":{"candidate":[["^(\\[error\\]|\\[warn\\]|warning:) BUSBAR-\\d{4}: ","\\1 "]]}}]}
+JSON
+ww_run() {  # <case> <variant> <accept-json> <want> <needle>
+  local case="$1" variant="$2" acc="$3" want="$4" needle="$5"
+  rm -rf "$W/ww-golden" "$W/ww-cand" "$W/out-ww"
+  cp -R "$FIX" "$W/ww-golden"; cp -R "$FIX" "$W/ww-cand"
+  ww_stderr "$W/ww-golden/cells/self__b__stream.json" "$case" golden    grown
+  ww_stderr "$W/ww-cand/cells/self__b__stream.json"   "$case" candidate "$variant"
+  bash "${here}/replay.sh" --golden "$W/ww-golden" --candidate "$W/ww-cand" --out "$W/out-ww" --cells "$W/rr-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$acc" --baseline "$W/no-baseline.txt" >"$W/out-ww.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-ww/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  if [ "$want" = accept ]; then
+    [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$diff_col" == *"$needle"* ]] \
+      && say PASS "WW-$case/$variant: $6" || say FAIL "WW-$case/$variant $6 (rc=$rc status=$status_col title=$title_col diff='$diff_col')"
+  else
+    [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$needle"* ]] \
+      && say PASS "WW-$case/$variant: $6" || say FAIL "WW-$case/$variant $6 (rc=$rc status=$status_col diff='$diff_col')"
+  fi
+}
+
+# (ww1) THE REAL SHAPE, GREEN: the stamped code is rewritten away on both sides first, and what is
+# left is exactly the four grown metrics — named on the row, per cell. REFUSED AT LOAD under 0.3.8.
+WW_ADDED="additive: added tokens_input, tokens_output, tokens_cache_read, tokens_cache_write"
+for c in P20 P29 P30; do
+  ww_run "$c" grown "$W/ww-accept.json" accept "$WW_ADDED" \
+    "the real stamped-code + grown-list line is proved under additive + transform + text_list_growth"
+done
+
+# (ww2) …AND THE PROOF IS STILL THE PROOF: the same stamped line whose list also DROPS a golden item
+# is red, naming the item, exactly as it is without a transform. The rewrite buys the prefix and
+# nothing else.
+for c in P20 P29 P30; do
+  ww_run "$c" dropped "$W/ww-accept.json" reject "additive: not a superset at list item" \
+    "a dropped item is still refused when a transform is in play"
+done
+
+# (ww3) the SAME pair under the 0.3.8 register — `additive` + `text_list_growth`, no transform — is
+# red on the prefix, which is the state these three cells were actually in.
+for c in P20 P29 P30; do
+  ww_run "$c" grown "$W/ww-notransform-accept.json" reject "additive: not a superset at text byte" \
+    "additive alone still cannot see past the stamped code (red before green)"
+done
+
+# (ww4) …and the transform ALONE cannot take it either: it fires, the rewritten pair is NOT
+# byte-identical (the list grew), so the class stays a real divergence. Neither kind alone, which is
+# why the two are allowed to be one entry.
+for c in P20 P29 P30; do
+  ww_run "$c" grown "$W/ww-transform-only-accept.json" reject "stderr line" \
+    "a transform alone is not credited when the rewritten pair still differs"
+done
 
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
