@@ -4,6 +4,23 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.1
+
+- **A `transform` in `accepted-differences.json` is applied symmetrically, not just to the
+  candidate.** `diff-cells.py`'s transform branch rewrote only the candidate side before
+  comparing, on the assumption that the pattern a transform strips (a diagnostic code, a
+  new metering series) exists on the candidate and never on the golden. That assumption
+  fails the moment the golden is *also* shaped like the candidate — two recordings of the
+  same binary taken to prove determinism, or a candidate-vs-candidate A/B — and stripping
+  the pattern from one side only manufactured a phantom divergence out of an
+  already-identical pair. The golden is now rewritten by the same rules before either side
+  is compared: when the golden lacks the pattern (the real golden-vs-candidate case) this
+  is a no-op, so the transform still only ever removes a difference, never invents one.
+  `replay-selftest.sh` proves all three properties this fix must hold: a self-diff (or any
+  candidate-vs-candidate pair) under a transform-bearing register now reports 0 diverging
+  (RED before this fix), the real asymmetric case is forgiven exactly as before, and a
+  genuine body divergence planted under a transform-bearing entry still reports RED.
+
 ## 0.3.0
 
 Four external audits of the tool at `v0.2.3` are the source of this release. Every
