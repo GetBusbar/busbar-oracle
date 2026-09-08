@@ -4,6 +4,29 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.2
+
+- **A fired transform may take a class it rendered identical, whatever that class is rated on
+  the cell's family.** 0.3.1's fired-transform branch subtracted the FAMILY-rated money set
+  (`money_at_cell`) from an entry's own `allowed` set even when the rewritten pair was
+  byte-identical, so an `improvement`-kind transform (e.g. stripping a `diag=BUSBAR-NNNN`
+  diagnostic suffix) could no longer be credited for `body` on any BODY_IS_CONTRACT family
+  (`boot.warning`, `boot.refusal`, `cli`, `config.migrate`, `admin.ops`, `ops.scrape`) — 18 real
+  `boot.warning` cells in busbar's own corpus went from accepted to a phantom divergence purely
+  because their family rates `body` 10 and the entry is not `kind: breaking`. The fired-transform
+  branch only ever runs once the rewritten pair has been PROVEN byte-identical (a transform
+  touches only `effects.stderr` and `body.text`, so every other field is a verbatim copy and
+  would still show up in the comparison if it moved); nothing is being forgiven at that point,
+  so the entry's own `allowed` set — already held to the GLOBAL money guard at load — is what
+  decides, not a second family-specific subtraction. A class the rewrite does not touch (a
+  changed `status`, a real body difference outside the rewritten pattern) still fails to reach
+  this branch at all and stays red, exactly as before.
+
+- **A transform pattern that can match the empty string, or names no literal text at all, is
+  refused at load** (`.*`, `\s*`, `(.|\n)*`, `\d+`, ...). "Byte-identical after the rewrite" only
+  proves the rewrite named the right token when the pattern IS a token; a pattern this broad can
+  swallow arbitrary surrounding content and would make that proof vacuous.
+
 ## 0.3.1
 
 - **A `transform` in `accepted-differences.json` is applied symmetrically, not just to the
