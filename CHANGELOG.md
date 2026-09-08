@@ -4,6 +4,42 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.8
+
+- **`text_list_growth` reads a PIPE-SEPARATED list, and proves growth as a SET rather than a
+  prefix.** Two changes to one check, both found the same way: busbar's three limit-validation
+  cells (`boot.refusal|BOOT-P20|validate`, `|BOOT-P29|`, `|BOOT-P30|`) all say the same thing — a
+  limit's metric enum gained the four token metrics 1.6.0 added (`tokens_input`, `tokens_output`,
+  `tokens_cache_read`, `tokens_cache_write`) — and all three stayed red under 0.3.7 for reasons
+  about PUNCTUATION and POSITION rather than about anything the message stopped saying.
+  (1) A list spelled the way a grammar is written out — `(requests | tokens | budget | concurrent)`,
+  or unparenthesised mid-sentence, `<metric> is one of requests|tokens|budget|concurrent and
+  <window> one of minute|hour|day|month|total` — is now found beside the backtick-quoted spelling,
+  by one rule: an item is a bare word, at least two of them joined by `|`, so a run ends at the
+  first token no pipe follows and cannot swallow the sentence around it. The parentheses are PROSE
+  AROUND the run, not part of it, and stay under the byte-identical-surroundings requirement like
+  every other character of the template. Runs of the two spellings never overlap, and a list that
+  changed WHICH spelling it uses is a template change, refused by name.
+  (2) The changed list's relation is now membership, not position: every golden item must appear
+  somewhere in the candidate's list (multiplicity respected), and whatever is left over is the
+  growth. Through 0.3.7 golden's items had to be an ordered PREFIX, so growth was only ever
+  forgiven at the END of a list — and real enums grow next to the item they refine. An item DROPPED
+  is still the first thing refused, named by its position in the golden's list.
+  DELIBERATE WIDENING, stated out loud: a candidate that merely REORDERS golden's items, adding
+  nothing, is a set superset and is now ACCEPTED, where 0.3.7 refused it as "added no new items".
+  A reordered operator-visible list is still a change nobody announced (busbar's own register says
+  so: F-013's BOOT-020 narrowing ruled exactly that "neither additive nor better" and fixed it
+  rather than forgiving it) — but catching it is the register's job, not this check's: an entry
+  naming the cell, with a changelog line and a declared width, still has to be written by a person
+  before any of this runs. Such a row says `additive: the declared list was REORDERED, no items
+  added or dropped` rather than falling through to a raw before/after that reads like a forgiven
+  rewrite. Everything else is byte-identical in behaviour: the splice proof (golden's own raw list
+  text put back into the candidate must reproduce golden BYTE FOR BYTE), the one-changed-list
+  limit, the every-other-list-byte-identical rule, the JSON-leaf path and its one-differing-leaf
+  slot, and every load-time refusal are untouched. In the self-test, the ONLY verdicts that move
+  are the two mid-list-insertion cases (`rr4`, `ss4`), which were red for the new item's position
+  alone and are now accepted naming it.
+
 ## 0.3.7
 
 - **`additive` gains `new_route`, for a route that did not exist in 1.5.5 now answering.** Every
