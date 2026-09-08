@@ -160,6 +160,12 @@ if old == rev:
     sys.exit(0)
 if old:
     m.setdefault("harness_rev_history", []).append(old)
+    # THE REV THE CELLS WERE RECORDED UNDER, kept once and never overwritten. `harness_rev` is about
+    # to become the rev of the code that RE-NORMALIZED them, which is not the same claim; without
+    # this the original is only recoverable by reading the history back-to-front and knowing which
+    # entry came from a merge and which from a re-normalization. diff-cells.py reads this field as
+    # part of a recording's provenance, so it is a fact the skew guard uses, not bookkeeping.
+    m.setdefault("harness_rev_recorded", old)
 m["harness_rev"] = rev
 note = (f"RE-NORMALIZED {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')} by renormalize.sh: "
         f"{n} cell(s) rewritten from the recorded raw captures under this harness revision. No cell was "

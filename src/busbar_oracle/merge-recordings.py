@@ -352,6 +352,12 @@ def merge(parts, out, allow_harness_skew=False, note=None, cells_json=None,
         # rev its cells actually came from is kept in the history rather than dropped on the floor.
         newest = max(metas, key=lambda pm: pm[1].get("at", ""))[1]
         meta["harness_rev"] = newest.get("harness_rev")
+        # The rev the cells were RECORDED under, kept once. `harness_rev` here speaks for the part
+        # recorded last and for nothing else; diff-cells.py reads this field (with the history and
+        # merged_from) as the recording's whole provenance, because one scalar comparing equal is
+        # not evidence that two recordings were made by the same harness.
+        if newest.get("harness_rev"):
+            meta.setdefault("harness_rev_recorded", newest.get("harness_rev"))
         history = list(meta.get("harness_rev_history", []))
         for r in sorted(revs - {newest.get("harness_rev")}):
             if r and r not in history:

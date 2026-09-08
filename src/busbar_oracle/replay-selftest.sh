@@ -236,6 +236,51 @@ bash "${here}/replay.sh" --golden "$W/hrev-g" --candidate "$W/hrev-c" --out "$W/
 rc=$?
 [ "$rc" = 0 ] && [ "$(fails_in "$W/out-m")" = 0 ] && say PASS "--allow-harness-skew proceeds past the same mismatch" || say FAIL "--allow-harness-skew rc=$rc fails=$(fails_in "$W/out-m")"
 
+# (m-2) THE SCALAR AGREES AND THE RECORDINGS STILL DO NOT. `harness_rev` is one field that
+# merge-recordings.py, renormalize.sh and a text editor all overwrite: a golden merged from a part
+# recorded under A and a part recorded under B is stamped with B alone, so a candidate recorded
+# today under B satisfied `grev == crev` and the differ compared the A cells against it with nothing
+# said. Each shape below is a real writer's output, and each must refuse on its own.
+_hrev_meta() {  # <dir> <python-dict-expression applied to the meta>
+  python3 -c "
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['harness_rev']='b'*64
+exec(sys.argv[2])
+json.dump(d, open(p,'w'))" "$1/meta.json" "$2"
+}
+skew_case() {  # <label> <golden-mutation> <want-rc>
+  local label="$1" gmut="$2" want="$3" dir_g="$W/skew-g" dir_c="$W/skew-c" rc
+  rm -rf "$dir_g" "$dir_c"; cp -R "$FIX" "$dir_g"; cp -R "$FIX" "$dir_c"
+  _hrev_meta "$dir_g" "$gmut"
+  _hrev_meta "$dir_c" "pass"
+  rm -rf "$W/out-skew"
+  bash "${here}/replay.sh" --golden "$dir_g" --candidate "$dir_c" --out "$W/out-skew" --cells "$CELLS" \
+    --no-check-golden --accepted "$W/no-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-skew.log" 2>&1
+  rc=$?
+  if [ "$rc" = "$want" ]; then say PASS "$label"; else say FAIL "$label (rc=$rc, want $want): $(tail -2 "$W/out-skew.log" | tr '\n' ' ' | cut -c1-200)"; fi
+}
+skew_case "a golden whose harness_rev_history names a rev the candidate never saw -> exit 2, even though the scalars agree" \
+          "d['harness_rev_history']=['a'*64]" 2
+skew_case "a golden merged from a part recorded under another rev (merged_from) -> exit 2" \
+          "d['merged_from']=[{'part':'rec','recorded':1,'harness_rev':'a'*64}]" 2
+skew_case "a golden whose harness_rev_recorded differs from its stamp -> exit 2 (the field is READ, not decoration)" \
+          "d['harness_rev_recorded']='a'*64" 2
+skew_case "identical provenance on both sides (the scalar alone) still compares" \
+          "pass" 0
+
+# …and the skew is authorisable, exactly like the scalar one, rather than being a wall.
+rm -rf "$W/skew2-g" "$W/skew2-c"; cp -R "$FIX" "$W/skew2-g"; cp -R "$FIX" "$W/skew2-c"
+_hrev_meta "$W/skew2-g" "d['harness_rev_history']=['a'*64]"
+_hrev_meta "$W/skew2-c" "pass"
+bash "${here}/replay.sh" --golden "$W/skew2-g" --candidate "$W/skew2-c" --out "$W/out-m2" --cells "$CELLS" \
+  --allow-harness-skew --no-check-golden --accepted "$W/no-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-m2.log" 2>&1
+rc=$?
+m2_flag="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['meta']['harness_skew_allowed'])" "$W/out-m2/report.json" 2>/dev/null)"
+[ "$rc" = 0 ] && [ "$m2_flag" = True ] \
+  && say PASS "--allow-harness-skew proceeds past a HISTORY skew and report.json records that it was used" \
+  || say FAIL "history skew under --allow-harness-skew rc=$rc harness_skew_allowed=$m2_flag"
+
 # (n) an accepted transform on a cell whose headers carry content-length: the length moves BECAUSE
 # the accepted rewrite moved the body, so it is the accepted change's shadow, not a second
 # divergence. The row must report `body` alone — a phantom `headers` both mis-describes the row and
@@ -898,7 +943,11 @@ fi
 # holds cells THIS harness wrote while meta.json still named the harness that recorded them. The skew
 # guard then compares two stale stamps, finds them equal, and permits a comparison across a
 # normalizer change. The rewrite has to move the stamp.
-rn="$W/renorm"; mkdir -p "$rn/cells" "$rn/raw/cli__--version"
+# ITS OWN DIRECTORY. This case used `$W/renorm`, which the script-cell refusal case above has
+# already filled with a raw/self__s__script/ tree — and renormalize.sh iterates `raw/*/`, so this
+# case re-normalized that cell too, under a different --cells, and its verdict was a function of a
+# fixture belonging to another case.
+rn="$W/renorm-restamp"; mkdir -p "$rn/cells" "$rn/raw/cli__--version"
 printf '%s\n' '{"status":0,"headers":{},"body":"busbar 1.5.5\\n","effects":{"stderr":""}}' >"$rn/raw/cli__--version/captured.json"
 printf '%s\n' '{"binary":"fixture","version":"busbar fixture","recorded":1,"harness_rev":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' >"$rn/meta.json"
 if bash "${here}/renormalize.sh" "$rn" >"$W/renorm.log" 2>&1; then
@@ -913,6 +962,14 @@ if bash "${here}/renormalize.sh" "$rn" >"$W/renorm.log" 2>&1; then
   case "$hist" in *deadbeefdeadbeef*) say PASS "the superseded harness_rev is kept in harness_rev_history" ;;
     *) say FAIL "renormalize.sh dropped the superseded harness_rev instead of recording it (history: ${hist:-<empty>})" ;;
   esac
+  # AND THE FIELD THE SKEW GUARD READS IS WRITTEN. `harness_rev_recorded` sat in the shipped golden
+  # while no file in this tool wrote it and no file read it — a claim nothing could check. It is the
+  # rev the cells were RECORDED under, which a re-stamp is precisely what destroys, and diff-cells.py
+  # now folds it into a recording's provenance.
+  hrec="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("harness_rev_recorded",""))' "$rn/meta.json")"
+  [ "$hrec" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ] \
+    && say PASS "renormalize.sh records the rev the cells were RECORDED under, which the skew guard reads" \
+    || say FAIL "renormalize.sh left harness_rev_recorded='${hrec:-<absent>}' — the field the provenance guard reads is written by nobody"
 else
   say FAIL "renormalize.sh failed on a minimal recording: $(tail -3 "$W/renorm.log")"
 fi

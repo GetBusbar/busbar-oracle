@@ -178,6 +178,42 @@ def host_rule_skew(g, c) -> dict | None:
     return {"only_golden": sorted(ga - ca), "only_candidate": sorted(ca - ga)}
 
 
+def provenance_revs(m: dict) -> set:
+    """Every harness revision a recording's cells could have been produced under.
+
+    `harness_rev` is the rev the recording CLAIMS, and on a recording that was merged or
+    re-normalized it is the rev of only some of its cells. The other names are where the rest went:
+
+      harness_rev_history       merge-recordings.py and renormalize.sh push every superseded rev here
+      merged_from[].harness_rev the rev each merged PART was recorded under, per part
+      harness_rev_recorded      the rev the cells were RECORDED under, before any re-stamp
+
+    That last field was a ghost: no file in this tool wrote it and no file read it, while it sat in
+    the shipped golden's meta.json carrying a real digest. A field that is neither written nor read
+    is a claim nothing can check — so it is written now (merge-recordings.py, renormalize.sh, both
+    `setdefault`, so the ORIGINAL recording rev survives every later re-stamp) and it is read here.
+
+    Non-string and empty entries are ignored rather than raising: this set decides whether a
+    comparison may happen at all, and a malformed history entry must not be the reason the differ
+    cannot render its refusal."""
+    revs = set()
+
+    def add(v):
+        if isinstance(v, str) and v.strip():
+            revs.add(v.strip())
+
+    if not isinstance(m, dict):
+        return revs
+    add(m.get("harness_rev"))
+    add(m.get("harness_rev_recorded"))
+    for v in m.get("harness_rev_history") or []:
+        add(v)
+    for part in m.get("merged_from") or []:
+        if isinstance(part, dict):
+            add(part.get("harness_rev"))
+    return revs
+
+
 def allowed_classes(kind: str, classes: set) -> set:
     """The classes an accepted-differences entry may forgive — ONE definition, shared by the
     loader's money guard and the matcher below.
@@ -466,15 +502,35 @@ def main() -> int:
     gmeta = meta(os.path.join(a.golden, "meta.json"))
     cmeta = meta(os.path.join(a.candidate, "meta.json"))
     grev, crev = gmeta.get("harness_rev"), cmeta.get("harness_rev")
+    grevs, crevs = provenance_revs(gmeta), provenance_revs(cmeta)
     # A diff only means "this is busbar's behavior" if the same recorder, normalizer and cell set
     # produced both sides. Either side missing its provenance is exactly as unproven as the two
     # sides disagreeing — a golden with no harness_rev cannot be trusted to match anything.
-    if grev is None or crev is None or grev != crev:
+    #
+    # AND `harness_rev` ALONE IS NOT THE PROVENANCE. It is ONE SCALAR that three shipped writers
+    # overwrite: merge-recordings.py stamps the rev of the part recorded LAST and pushes the others
+    # onto `harness_rev_history`; renormalize.sh re-stamps it and does the same; a re-stamp by hand
+    # leaves a note and nothing else. So a golden whose 913 cells were recorded under A and whose 2
+    # re-recorded cells were made under B carries `harness_rev: B` — and a candidate recorded today
+    # under B satisfied `grev == crev` exactly, this guard said nothing, and the differ compared 913
+    # cells whose normalization predates the change against a candidate that postdates it. That is
+    # the situation this refusal's own message describes, reached by laundering the field upstream
+    # of the flag that is supposed to authorise it. The provenance is therefore the WHOLE SET —
+    # harness_rev, harness_rev_history, merged_from[].harness_rev and harness_rev_recorded — and the
+    # two sides must name the same one. See provenance_revs().
+    if grev is None or crev is None or grevs != crevs:
         if not a.allow_harness_skew:
             if grev is None or crev is None:
                 why = f"golden harness_rev={grev!r} candidate harness_rev={crev!r} (one or both meta.json predate this field)"
-            else:
+            elif grev != crev:
                 why = f"golden harness_rev={grev} candidate harness_rev={crev}"
+            else:
+                why = (f"golden and candidate both stamp harness_rev={grev}, but the recordings were "
+                       f"not made under the same set of harness revisions: golden "
+                       f"{sorted(grevs)} vs candidate {sorted(crevs)} (from harness_rev, "
+                       f"harness_rev_history, harness_rev_recorded and merged_from[].harness_rev — "
+                       f"a merged or re-normalized recording keeps the revs its cells really came "
+                       f"from, and one scalar cannot speak for all of them)")
             sys.stderr.write(
                 "diff-cells: refusing to compare — golden and candidate were not proven to come from the "
                 f"same shadow-oracle harness revision ({why}). A diff between them may be explained by a "
@@ -785,7 +841,11 @@ def main() -> int:
                  "candidate_version": cmeta.get("version"), "cells_json": a.cells, "family_filter": a.family,
                  "golden_binary_sha256": gmeta.get("binary_sha256"), "candidate_binary_sha256": cmeta.get("binary_sha256"),
                  "golden_harness_rev": grev, "candidate_harness_rev": crev,
-                 "harness_skew_allowed": bool(a.allow_harness_skew and (grev is None or crev is None or grev != crev))},
+                 # The whole provenance, not just the scalar, so a reader of the report can see a
+                 # mixed-rev recording without opening meta.json — and so `harness_skew_allowed`
+                 # is true for a history skew exactly as it is for a scalar one.
+                 "golden_harness_revs": sorted(grevs), "candidate_harness_revs": sorted(crevs),
+                 "harness_skew_allowed": bool(a.allow_harness_skew and (grev is None or crev is None or grevs != crevs))},
         "totals": {"cells_in_scope": len(cells), "owed": len(owed), "gaps": len(gaps),
                    "diverging": sum(1 for r in results if r["classes"] and "accepted" not in r),
                    "accepted": sum(1 for r in results if "accepted" in r), "W": W, "D": D,
