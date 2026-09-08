@@ -4,6 +4,50 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.10
+
+Two gaps 0.3.9 named as blockers and left open. Both were the TOOL's, not the product's, and both
+stood between `admin.ops|GetOpenapiJson|ok` and a verdict the tool proves rather than one the
+register asserts — under the owner's standing rule that 1.5.5's recorded descriptions are VERBATIM,
+the judge has to read what the product actually wrote.
+
+- **`text_list_growth` reads a THIRD spelling: backtick-quoted items joined by pipes.** 1.5.5's own
+  400 line on the DELETE `/api/v1/admin/overlay/{section}` route is
+  `` (expected `groups`|`hooks`|`root`|`plugin_versions`) ``, and its `OverlayResetView.reset`
+  description is the spaced form `` (`groups` | `hooks` | `root` | `plugin_versions`) ``. Neither was
+  read by either existing rule — the backtick rule wants `, ` / ` or ` / `, or ` between its items,
+  and the pipe rule's item is a BARE word (backticks are excluded from it so an unparenthesised run
+  cannot swallow the sentence around it) — so a candidate that ONLY GREW that list, in the golden's
+  own spelling, with nothing else on the line touched, was refused for the punctuation rather than
+  for anything the message stopped saying. That left the register only one way to accept real growth:
+  declare it, which is exactly the say-so `additive` exists to replace. The run is now its own kind
+  (`backtick-pipe`), under the SAME set relation, the SAME splice proof and the SAME
+  every-other-list-byte-identical requirement as the other two. Because it is its own kind, a list
+  that moved BETWEEN spellings is still a template change refused by name — which is what 1.6.0 did
+  to that very line (`` `a`|`b` `` became "expected one of `a`, `b`"), and it stays red. Runs are
+  read longest-first from the earliest start, so `` `a`|`b`, `c` `` is one backtick-pipe run from
+  `a`, never a bare backtick run starting at `b`.
+
+- **JSON pointers are RFC 6901, in both directions.** The differ's path convention was a `/`-join,
+  not a pointer, and a document whose KEYS contain slashes broke it at both ends at once: an OpenAPI
+  `paths` key IS a URL, so `additive_superset` reported a leaf as
+  `/paths//api/v1/admin/overlay/{section}/delete/summary` and `resolve_json_pointer` split that back
+  into segments (`paths`, ``, `api`, …) that named nothing. The register could not address a single
+  leaf of the largest document busbar records; the 0.3.6 guard refused such an entry at load, which
+  was the polite failure and still a dead end. Paths are now BUILT with `~0`/`~1` escaping
+  (`ptr_escape`, `~` first then `/`, so an escaped literal `~1` cannot become a slash) and RESOLVED
+  unescaped (`ptr_unescape`, `~1` first then `~0`), so `description_corrections` can name
+  `/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/409/description`. THE ESCAPING WIDENS
+  WHAT CAN BE ADDRESSED, NEVER WHAT MAY BE MISSING: a pointer that still resolves nowhere after
+  unescaping is refused at load exactly as before. A key containing neither `/` nor `~` escapes to
+  itself, so every path this file has ever printed for every other cell in the corpus is
+  byte-identical. `""`/`"/"` remains this file's root convention (RFC 6901 would read `/` as the
+  empty-string key); nothing addresses an empty key here, and moving it would move existing verdicts.
+
+Nothing else moves. Every verdict in the self-test outside the eight cases these two changes are for
+is unchanged, and the only paths whose TEXT changes are those under a slash-bearing key, which no
+cell but the openapi document has.
+
 ## 0.3.9
 
 - **`text_list_growth` proves EVERY grown string leaf of a body, not one slot.** One
