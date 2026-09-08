@@ -810,6 +810,81 @@ ss_run "two differing string leaves are refused together, naming both paths" \
   'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, or `identity-providers`' \
   "see the docs" reject "more than one differing string leaf: /error/message, /hint"
 
+# (tt) `description_corrections` — A NAMED LEAF MAY DIFFER OUTRIGHT, NO GROWTH PROOF NEEDED, BECAUSE
+# THE REGISTER SAYS SO EXPLICITLY. Unlike `text_list_growth` (which proves growth mechanically),
+# this is a declared factual correction to 1.5.5's prose: the entry names the exact JSON pointer,
+# and ONLY that leaf may differ — every other leaf still follows the ordinary superset rules, and a
+# pointer that never resolves to a string in the golden is refused before any cell is even compared.
+tt_cells() {  # <out> — self|a|ok reclassified onto a BODY_IS_CONTRACT family, like admin.ops
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = "admin.ops"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+tt_cells "$W/tt-cells.json"
+cat >"$W/tt-accept.json" <<'JSON'
+{"accepted":[{"id":"TT-1 corrected description","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body"],"changelog":"selftest: corrected a factually wrong description","rationale":"selftest: description_corrections proof","description_corrections":["/description"]}]}
+JSON
+tt_body() {  # <out-cell-json> <description>
+  python3 - "$1" "$2" <<'EOF'
+import json, sys
+p, desc = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d["body"]["json"]["description"] = desc
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+cp -R "$FIX" "$W/tt-golden"
+tt_body "$W/tt-golden/cells/self__a__ok.json" "the OLD wrong text"
+
+# (tt1) the LISTED leaf differs -> ACCEPTED, naming it with BOTH texts.
+cp -R "$FIX" "$W/tt1-c"
+tt_body "$W/tt1-c/cells/self__a__ok.json" "the corrected text"
+bash "${here}/replay.sh" --golden "$W/tt-golden" --candidate "$W/tt1-c" --out "$W/out-tt1" --cells "$W/tt-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/tt-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-tt1.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-tt1/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$title_col" == *"TT-1"* ]] \
+  && [[ "$diff_col" == *"corrected /description"* ]] && [[ "$diff_col" == *"the OLD wrong text"* ]] && [[ "$diff_col" == *"the corrected text"* ]] \
+  && say PASS "description_corrections accepts a listed leaf that differs, naming it with both texts" \
+  || say FAIL "TT-1 listed-leaf correction was not accepted-with-both-texts: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
+
+# (tt2) an UNLISTED leaf differs -> still RED — description_corrections covers exactly the paths it
+# names, nothing wider.
+cp -R "$FIX" "$W/tt2-c"
+tt_body "$W/tt2-c/cells/self__a__ok.json" "the OLD wrong text"
+python3 - "$W/tt2-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["json"]["usage"]["in"] = 99
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$W/tt-golden" --candidate "$W/tt2-c" --out "$W/out-tt2" --cells "$W/tt-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/tt-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-tt2.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-tt2/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"not a superset at /usage/in"* ]] \
+  && say PASS "description_corrections does not cover an unlisted leaf -- still RED" \
+  || say FAIL "TT-2 unlisted-leaf divergence was not red: rc=$rc status=$status_col diff='$diff_col'"
+
+# (tt3) a listed pointer that is NOT a string leaf in the golden -> refused at LOAD.
+cat >"$W/tt3-accept.json" <<'JSON'
+{"accepted":[{"id":"TT-3 bad pointer","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body"],"changelog":"x","rationale":"y","description_corrections":["/usage"]}]}
+JSON
+bash "${here}/replay.sh" --golden "$W/tt-golden" --candidate "$W/tt-golden" --out "$W/out-tt3" --cells "$W/tt-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/tt3-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-tt3.log" 2>&1
+rc=$?
+grep -qi "not a string leaf" "$W/out-tt3.log" && msg_ok=1 || msg_ok=0
+[ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
+  && say PASS "description_corrections naming a pointer that is not a string leaf in the golden is refused at load" \
+  || say FAIL "TT-3 non-string-leaf pointer was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-tt3.log)"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
