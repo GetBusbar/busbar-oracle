@@ -174,7 +174,7 @@ def body_as_json(body) -> tuple:
     return None, False
 
 
-def additive_superset(golden, cand, path: str, null_to_value: set) -> str | None:
+def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs: list | None = None) -> str | None:
     """The first JSON-pointer path where `cand` is NOT a superset of `golden`, or None if it is one
     everywhere. The relation, applied recursively:
 
@@ -191,7 +191,16 @@ def additive_superset(golden, cand, path: str, null_to_value: set) -> str | None
                is not free — it names a path the register did not always populate, and the entry
                must list it under `null_to_value` to claim it (never a blanket default, or `null`
                would stop being a signal that the field is genuinely absent).
-    """
+
+    `string_diffs`, when passed a list, turns a STRING leaf's mismatch from an immediate failure
+    into a deferred one: `(path, golden_str, cand_str)` is appended and the walk continues, instead
+    of stopping at the first string that differs. This is what lets the caller apply
+    `text_list_growth_check()` to a leaf embedded inside an otherwise-superset JSON body (an error
+    message field that grew its own backtick list) while still catching a SECOND differing leaf as
+    a real divergence — two strings that changed is not "one list grew", whatever either one says
+    on its own. Every other mismatch (a missing key, a short array, a non-string scalar, a `null`
+    not covered by `null_to_value`) is unaffected and fails immediately, exactly as before: this
+    parameter only ever WIDENS what continues walking, never what ultimately passes."""
     if golden is None and cand is not None:
         return None if path in null_to_value else (path or "/")
     if isinstance(golden, dict):
@@ -200,7 +209,7 @@ def additive_superset(golden, cand, path: str, null_to_value: set) -> str | None
         for k, gv in golden.items():
             if k not in cand:
                 return f"{path}/{k}"
-            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value)
+            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value, string_diffs)
             if bad is not None:
                 return bad
         return None
@@ -208,11 +217,14 @@ def additive_superset(golden, cand, path: str, null_to_value: set) -> str | None
         if not isinstance(cand, list) or len(cand) < len(golden):
             return path or "/"
         for i, gv in enumerate(golden):
-            bad = additive_superset(gv, cand[i], f"{path}/{i}", null_to_value)
+            bad = additive_superset(gv, cand[i], f"{path}/{i}", null_to_value, string_diffs)
             if bad is not None:
                 return bad
         return None
     if golden != cand:
+        if string_diffs is not None and isinstance(golden, str) and isinstance(cand, str):
+            string_diffs.append((path or "/", golden, cand))
+            return None
         return path or "/"
     return None
 
@@ -263,6 +275,12 @@ def _first_diff_byte(a: str, b: str) -> int:
         if x != y:
             return i
     return min(len(a), len(b))
+
+
+def _sans_additive_prefix(note: str) -> str:
+    """`note` with its leading "additive: " stripped, for splicing into a wider message that
+    already says "additive:" once (e.g. naming the JSON path a leaf-level check failed at)."""
+    return note[len("additive: "):] if note.startswith("additive: ") else note
 
 
 def text_list_growth_check(golden: str, cand: str) -> tuple:
@@ -711,8 +729,14 @@ def first_diff_text(classes, detail) -> str:
     if d is None and detail.get("accepted.transform"):
         return f"{k}: identical after the accepted rewrite {detail['accepted.transform']}"
     if k in ADDITIVE_CLASSES and detail.get("additive.removed"):
-        items = [i for entry in detail["additive.removed"] for i in entry.get("removed", [])]
-        return ("additive: added " + ", ".join(dict.fromkeys(items))) if items else "additive: superset (no new items)"
+        parts = []
+        for entry in detail["additive.removed"]:
+            items = entry.get("removed") or []
+            if not items:
+                continue
+            where = f" at {entry['path']}" if entry.get("path") else ""
+            parts.append(f"added {', '.join(dict.fromkeys(items))}{where}")
+        return ("additive: " + "; ".join(parts)) if parts else "additive: superset (no new items)"
     if k in ADDITIVE_CLASSES and detail.get("additive.rejected"):
         return detail["additive.rejected"]
     if k == "status":
@@ -1156,30 +1180,57 @@ def main() -> int:
                         continue
                     claimed, body_ok = set(), False
                     if "body" in want:
-                        if e["text_list_growth"]:
-                            gtext = g.get("body", {}).get("text") if isinstance(g.get("body"), dict) else None
-                            ctext = cc.get("body", {}).get("text") if isinstance(cc.get("body"), dict) else None
-                            if isinstance(gtext, str) and isinstance(ctext, str):
-                                removed, note = text_list_growth_check(gtext, ctext)
-                                if removed is not None:
-                                    claimed.add("body"); body_ok = True
-                                    if removed:
-                                        additive_removed.append({"entry": e["id"], "class": "body", "removed": removed})
-                                else:
-                                    additive_note = note
+                        gtext = g.get("body", {}).get("text") if isinstance(g.get("body"), dict) else None
+                        ctext = cc.get("body", {}).get("text") if isinstance(cc.get("body"), dict) else None
+                        if e["text_list_growth"] and isinstance(gtext, str) and isinstance(ctext, str):
+                            # a plain-text body (SSE, CLI stdout): the whole body IS the one string
+                            # to prove growth on, same as effects.stderr below.
+                            removed, note = text_list_growth_check(gtext, ctext)
+                            if removed is not None:
+                                claimed.add("body"); body_ok = True
+                                if removed:
+                                    additive_removed.append({"entry": e["id"], "class": "body", "removed": removed})
                             else:
-                                additive_note = "additive: body has no text on both sides for text_list_growth"
+                                additive_note = note
                         else:
                             gj, gok = body_as_json(g.get("body"))
                             cj, cok = body_as_json(cc.get("body"))
-                            if gok and cok:
+                            if not (gok and cok):
+                                additive_note = ("additive: body is not JSON on both sides" if not e["text_list_growth"]
+                                                 else "additive: body has no text or JSON on both sides for text_list_growth")
+                            elif e["text_list_growth"]:
+                                # `text_list_growth` reaches INSIDE an otherwise-superset JSON body:
+                                # a STRING leaf mismatch is deferred (string_diffs) rather than
+                                # failing the walk immediately, so an error-message field that grew
+                                # its own backtick list can still pass — but only when it is the
+                                # ONLY leaf that differs. Two differing leaves is not "one list
+                                # grew" under either leaf's own story, whatever either one says on
+                                # its own, so BOTH are named and the cell stays red.
+                                string_diffs = []
+                                bad = additive_superset(gj, cj, "", e["null_to_value"], string_diffs)
+                                if bad is not None:
+                                    additive_note = f"additive: not a superset at {bad}"
+                                elif len(string_diffs) > 1:
+                                    paths = ", ".join(p for p, _, _ in string_diffs)
+                                    additive_note = f"additive: text_list_growth found more than one differing string leaf: {paths}"
+                                elif not string_diffs:
+                                    claimed.add("body"); body_ok = True
+                                else:
+                                    leaf_path, gstr, cstr = string_diffs[0]
+                                    removed, note = text_list_growth_check(gstr, cstr)
+                                    if removed is not None:
+                                        claimed.add("body"); body_ok = True
+                                        if removed:
+                                            additive_removed.append({"entry": e["id"], "class": "body",
+                                                                     "path": leaf_path, "removed": removed})
+                                    else:
+                                        additive_note = f"additive: not a superset at {leaf_path} ({_sans_additive_prefix(note)})"
+                            else:
                                 bad = additive_superset(gj, cj, "", e["null_to_value"])
                                 if bad is None:
                                     claimed.add("body"); body_ok = True
                                 else:
                                     additive_note = f"additive: not a superset at {bad}"
-                            else:
-                                additive_note = "additive: body is not JSON on both sides"
                     if "headers" in want:
                         bad = additive_headers_superset(g.get("headers", {}), cc.get("headers", {}), body_ok)
                         if bad is None:
