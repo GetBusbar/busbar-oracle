@@ -318,14 +318,47 @@ _LIST_ITEM_RX = re.compile(r"`([^`]*)`")
 # ", or " is not swallowed as a bare ", ". At least two items: a single `token` in prose is not "a
 # list", it is just a quoted word.
 _LIST_RUN_RX = re.compile(r"`[^`]*`(?:(?:, or | or |, )`[^`]*`)+")
+# THE SECOND SPELLING (0.3.8): A PIPE-SEPARATED RUN, THE WAY A GRAMMAR IS WRITTEN OUT IN PROSE.
+# busbar's own limit validator does not backtick-quote its enums, it prints the alternation the way
+# a BNF does — `a limit needs exactly one metric key (requests | tokens | budget | concurrent)`
+# (boot.refusal|BOOT-P20|validate), and unparenthesised in the middle of a sentence,
+# `<metric> is one of requests|tokens|budget|concurrent and <window> one of minute|hour|day|month|
+# total` (BOOT-P30). Both are the same object as the backtick list: an enum an operator is told to
+# choose from. The parentheses in the first spelling are PROSE AROUND the run, not part of it — the
+# run itself is what lives between them — so ONE rule reads both, and the parens stay under the
+# byte-identical-surroundings requirement like every other character of the template.
+# An item is a bare word (no spaces, no backticks, no brackets), so an unparenthesised run ends at
+# the first token that is not followed by another `|`, and cannot swallow the sentence around it.
+# At least two items, same as the backtick rule: `a|b` is a list, a lone `a` is a word.
+_PIPE_ITEM = r"[^\s`|()\[\]{}]+"
+_PIPE_RUN_RX = re.compile(rf"{_PIPE_ITEM}(?:[ \t]*\|[ \t]*{_PIPE_ITEM})+")
 
 
-def find_backtick_lists(text: str) -> list:
-    """[(start, end, [item, ...]), ...] for every maximal backtick-quoted list run in `text`, in
-    the order they appear."""
-    out = []
+# What an accepted row says when the growth proof passed with NOTHING added — the set-superset case
+# 0.3.8 allows and 0.3.7 refused ("added no new items"). It is spelled out rather than left to the
+# ordinary text-diff rendering, because "ACCEPTED" beside a raw before/after with no `added ...` in
+# it reads like the register forgave a rewrite; this row has to say which of the two it was.
+_REORDER_NOTE = "the declared list was REORDERED, no items added or dropped"
+
+
+def find_text_lists(text: str) -> list:
+    """[(start, end, [item, ...], kind), ...] for every maximal list run in `text` — backtick-quoted
+    (`kind="backtick"`) or pipe-separated (`kind="pipe"`) — in the order they appear.
+
+    Runs never overlap: the two spellings are read independently and a run that starts inside one
+    already taken is dropped (longest wins at an equal start). A backtick-quoted list whose items
+    happen to be joined by pipes is therefore ONE list either way, never two half-read ones."""
+    spans = []
     for m in _LIST_RUN_RX.finditer(text):
-        out.append((m.start(), m.end(), _LIST_ITEM_RX.findall(m.group(0))))
+        spans.append((m.start(), m.end(), _LIST_ITEM_RX.findall(m.group(0)), "backtick"))
+    for m in _PIPE_RUN_RX.finditer(text):
+        spans.append((m.start(), m.end(), [p.strip() for p in m.group(0).split("|")], "pipe"))
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+    out = []
+    for s in spans:
+        if out and s[0] < out[-1][1]:
+            continue
+        out.append(s)
     return out
 
 
@@ -346,24 +379,40 @@ def text_list_growth_check(golden: str, cand: str) -> tuple:
     """(removed, note). `removed` is the list of items present in `cand`'s list but not `golden`'s
     — reported on the accepted row — and is None on failure, where `note` names why.
 
-    The relation: find every backtick-list run in each text (same count, same order, or refused —
-    "growth in two lists" below); every run except AT MOST ONE must be byte-identical between the
-    two texts; the ONE run that differs must hold golden's items as a PREFIX, in order (an item
-    removed, reordered, or inserted before the end breaks this); and — the actual proof — splicing
-    GOLDEN's own raw list text back into `cand` at that run's position must reproduce `golden`
-    BYTE FOR BYTE. That last step is what catches a reworded template: the surrounding sentence is
-    never inspected on its own terms, only through whether putting golden's list back closes the
-    gap completely. A `\\d+`-shaped hole around the list — different wording before or after it —
-    fails this splice exactly where the wording starts to differ."""
+    The relation: find every list run in each text (backtick-quoted or pipe-separated; same count,
+    same order, same spelling, or refused — "growth in two lists" below); every run except AT MOST
+    ONE must be byte-identical between the two texts; the ONE run that differs must hold every one
+    of golden's items SOMEWHERE in the candidate's — as a SET, not a prefix (0.3.8; see below) — and
+    — the actual proof — splicing GOLDEN's own raw list text back into `cand` at that run's position
+    must reproduce `golden` BYTE FOR BYTE. That last step is what catches a reworded template: the
+    surrounding sentence is never inspected on its own terms, only through whether putting golden's
+    list back closes the gap completely. A `\\d+`-shaped hole around the list — different wording
+    before or after it — fails this splice exactly where the wording starts to differ.
+
+    SET, NOT PREFIX (0.3.8). Through 0.3.7 golden's items had to be an ordered PREFIX of the
+    candidate's, so growth was only ever forgiven at the END of a list. Real enums do not grow
+    there: busbar's limit grammar puts the four new token metrics next to the `tokens` they refine
+    (`requests | tokens | tokens_input | ... | budget | concurrent`), which is a MID-LIST insertion
+    and was red for its position rather than for anything it changed. The relation is now
+    membership: every golden item must appear in the candidate's list (multiplicity respected —
+    an item removed is still the first thing this refuses), and whatever is left over is the
+    growth. A DELIBERATE WIDENING RIDES ALONG: a candidate that merely REORDERS golden's items,
+    adding nothing, is a set superset and is now accepted, where 0.3.7 refused it as "added no new
+    items". A re-ordered enum IS operator-visible, and the register's own history says so
+    (`F-013`'s BOOT-020 narrowing: a reordered protocol list was ruled "a change nobody announced"
+    and fixed rather than forgiven) — but it is not this check's job to catch it twice over: an
+    entry must still be written, named, changelogged and scoped to the cell before any of this runs.
+    Order INSIDE the one declared list is what an entry now buys; the template around it, every
+    other list in the text, and every item the golden named are all still held byte-exact."""
     if golden == cand:
         return [], None
-    g_lists, c_lists = find_backtick_lists(golden), find_backtick_lists(cand)
+    g_lists, c_lists = find_text_lists(golden), find_text_lists(cand)
     if len(g_lists) != len(c_lists):
         return None, (f"additive: text_list_growth could not pair the golden and candidate lists "
                        f"(golden has {len(g_lists)}, candidate has {len(c_lists)})")
     if not g_lists:
         i = _first_diff_byte(golden, cand)
-        return None, f"additive: not a superset at text byte {i} (no backtick list found)"
+        return None, f"additive: not a superset at text byte {i} (no backtick or pipe list found)"
     changed = []
     for i, (g_l, c_l) in enumerate(zip(g_lists, c_lists)):
         if g_l[2] != c_l[2]:
@@ -371,21 +420,29 @@ def text_list_growth_check(golden: str, cand: str) -> tuple:
     if len(changed) > 1:
         return None, ("additive: text_list_growth touched more than one backtick list — one "
                        "declared list per entry keeps the check narrow; split it into two entries")
+    for i, (g_l, c_l) in enumerate(zip(g_lists, c_lists)):
+        if g_l[3] != c_l[3]:
+            return None, (f"additive: text_list_growth paired a {g_l[3]} list with a {c_l[3]} list "
+                           f"(list {i}) — a list that changed how it is SPELLED is a template change")
     if not changed:
         # every list is byte-identical item-for-item; the texts still differ, so the difference is
         # in the surrounding prose, not in any list at all.
         i = _first_diff_byte(golden, cand)
         return None, f"additive: not a superset at text byte {i}"
     k = changed[0]
-    gs, ge, gitems = g_lists[k]
-    cs, ce, citems = c_lists[k]
-    mismatch = next((i for i in range(len(gitems)) if i >= len(citems) or citems[i] != gitems[i]), None)
-    if mismatch is not None:
-        got = repr(citems[mismatch]) if mismatch < len(citems) else "<missing>"
-        return None, (f"additive: not a superset at list item {mismatch} ({got} != {gitems[mismatch]!r}, "
-                       f"golden's items are not a prefix of the candidate's)")
-    if len(citems) <= len(gitems):
-        return None, "additive: not a superset (candidate's list added no new items)"
+    gs, ge, gitems = g_lists[k][0], g_lists[k][1], g_lists[k][2]
+    cs, ce, citems = c_lists[k][0], c_lists[k][1], c_lists[k][2]
+    # MEMBERSHIP, NOT POSITION (0.3.8). Every golden item must be found in the candidate's list —
+    # one candidate slot per golden item, so a list that says `tokens` twice in the golden must say
+    # it twice in the candidate — and what is left unclaimed is the growth, reported in the
+    # candidate's own order. A golden item with no partner is the DROP this check exists to refuse,
+    # and it is named by its position in the GOLDEN's list, which is the list the reader has.
+    unclaimed = list(citems)
+    for i, item in enumerate(gitems):
+        if item not in unclaimed:
+            return None, (f"additive: not a superset at list item {i} ({item!r} is in the golden's "
+                           f"list and not in the candidate's)")
+        unclaimed.remove(item)
     # every OTHER list must be byte-identical, not merely item-identical — a re-ordered "or"/comma
     # around unrelated, unchanged items is still a template change this check must not launder.
     for i, (g_l, c_l) in enumerate(zip(g_lists, c_lists)):
@@ -398,7 +455,7 @@ def text_list_growth_check(golden: str, cand: str) -> tuple:
     reconciled = cand[:cs] + golden[gs:ge] + cand[ce:]
     if reconciled != golden:
         return None, f"additive: not a superset at text byte {_first_diff_byte(golden, reconciled)}"
-    return citems[len(gitems):], None
+    return unclaimed, None
 
 # ── THE ONE EXEMPTION FROM `norm.rules`, AND THE ONLY KIND OF RULE ALLOWED INTO IT ───────────────
 # `norm.rules` exists because a normalizer rule that fires on ONE side is itself a finding: content
@@ -959,15 +1016,16 @@ def main() -> int:
                              f"change an owner must document, exactly as `breaking` requires.")
                 # `effects.stderr` (and a text `body`, under this flag) has NO JSON structure to walk
                 # — it is a raw string, and the only growth proof this file knows for a raw string is
-                # `text_list_growth`: one backtick-quoted comma list in the candidate holds golden's
-                # items as a prefix, everything else byte-identical. Naming `effects.stderr` without
+                # `text_list_growth`: one list in the candidate (backtick-quoted, or pipe-separated
+                # the way a grammar is written out) holds every one of golden's items, everything
+                # else byte-identical. Naming `effects.stderr` without
                 # opting into that check would otherwise fall through to `body_as_json()`, which
                 # would just report "not JSON on both sides" for every cell forever — a silent no-op
                 # acceptance that never fires is worse than a refusal at load.
                 if "effects.stderr" in base["allowed"] and not e.get("text_list_growth"):
                     sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and names "
                              f"'effects.stderr', which has no JSON-superset relation. Set "
-                             f"`text_list_growth: true` to use the backtick-list-growth proof instead.")
+                             f"`text_list_growth: true` to use the text-list-growth proof instead.")
                 # `status` is refused unless `new_route: true` is set — there is no superset relation
                 # for a status code (it is equal or it is a real divergence) OUTSIDE the one
                 # carve-out `new_route` names: a route 1.5.5 did not have (golden 404, the 1.5.5
@@ -1325,8 +1383,9 @@ def main() -> int:
                             removed, note = text_list_growth_check(gtext, ctext)
                             if removed is not None:
                                 claimed.add("body"); body_ok = True
-                                if removed:
-                                    additive_removed.append({"entry": e["id"], "class": "body", "removed": removed})
+                                additive_removed.append({"entry": e["id"], "class": "body", "removed": removed}
+                                                        if removed else
+                                                        {"entry": e["id"], "class": "body", "note": _REORDER_NOTE})
                             else:
                                 additive_note = note
                         else:
@@ -1358,9 +1417,11 @@ def main() -> int:
                                     removed, note = text_list_growth_check(gstr, cstr)
                                     if removed is not None:
                                         claimed.add("body"); body_ok = True
-                                        if removed:
-                                            additive_removed.append({"entry": e["id"], "class": "body",
-                                                                     "path": leaf_path, "removed": removed})
+                                        additive_removed.append(
+                                            {"entry": e["id"], "class": "body", "path": leaf_path, "removed": removed}
+                                            if removed else
+                                            {"entry": e["id"], "class": "body", "path": leaf_path,
+                                             "note": f"{_REORDER_NOTE} at {leaf_path}"})
                                         if corrections_report:
                                             additive_removed.append({"entry": e["id"], "class": "body",
                                                                      "corrections": corrections_report})
@@ -1384,8 +1445,10 @@ def main() -> int:
                             removed, note = text_list_growth_check(gtext, ctext)
                             if removed is not None:
                                 claimed.add("effects.stderr")
-                                if removed:
-                                    additive_removed.append({"entry": e["id"], "class": "effects.stderr", "removed": removed})
+                                additive_removed.append(
+                                    {"entry": e["id"], "class": "effects.stderr", "removed": removed}
+                                    if removed else
+                                    {"entry": e["id"], "class": "effects.stderr", "note": _REORDER_NOTE})
                             else:
                                 additive_note = note
                         else:
