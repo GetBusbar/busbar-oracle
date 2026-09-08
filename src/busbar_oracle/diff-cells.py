@@ -728,12 +728,33 @@ def main() -> int:
         else:
             fired = []
             if transforms and isinstance(cc, dict) and "__corrupt__" not in cc:
+                # THE TRANSFORM IS A NORMALIZATION, NOT A ONE-SIDED CANDIDATE REWRITE. Applying it
+                # only to `cc` assumes the golden never carries the pattern being stripped — true
+                # for a real 1.5.5-golden vs 1.6.0-candidate diff (a diagnostic code or a new
+                # metering series exists only on the candidate side there), but false the moment the
+                # golden is itself 1.6.0-shaped: e.g. two independent recordings of the SAME 1.6.0
+                # binary taken to prove determinism, or a candidate-vs-candidate A/B. There the
+                # golden line keeps the pattern while the transformed candidate loses it, so an
+                # already-identical pair reports a phantom body/effects.stderr divergence. `g_t` is
+                # rewritten by the same rules so the transform applies uniformly: when the golden
+                # lacks the pattern (the real 1.5.5-vs-1.6.0 case) `g_t == g` and this is a no-op, so
+                # it only ever REMOVES a difference, never manufactures one.
+                g_t = json.loads(json.dumps(g)) if isinstance(g, dict) else g
                 cc_t = json.loads(json.dumps(cc))
                 body_changed = False
                 for t in transforms:
                     if not t["rx"].search(cid):
                         continue
                     hit = False
+                    if isinstance(g_t, dict):
+                        geff = g_t.get("effects", {})
+                        if isinstance(geff.get("stderr"), str):
+                            for rx, repl in t["transform"]:
+                                geff["stderr"] = rx.sub(repl, geff["stderr"])
+                        gbody = g_t.get("body")
+                        if isinstance(gbody, dict) and isinstance(gbody.get("text"), str):
+                            for rx, repl in t["transform"]:
+                                gbody["text"] = rx.sub(repl, gbody["text"])
                     eff = cc_t.get("effects", {})
                     if isinstance(eff.get("stderr"), str):
                         for rx, repl in t["transform"]:
@@ -752,16 +773,16 @@ def main() -> int:
                     if body_changed:
                         # a rewritten body cannot keep 1.5.5's byte length; the length header is the
                         # accepted change's shadow, not a second divergence. It has to come off ALL
-                        # THREE sides: `cc` (the untransformed candidate) is what classes_raw is
+                        # FOUR sides: `cc` (the untransformed candidate) is what classes_raw is
                         # computed from, and those are the classes the row REPORTS and the classes
                         # the accepted-entry match is tested against — leaving content-length on cc
                         # alone gave every accepted-transform row a phantom `headers` class, which
                         # both mis-described the row and made a correctly narrow `classes: [body]`
                         # entry fail to match.
-                        for side in (g, cc, cc_t):
+                        for side in (g, g_t, cc, cc_t):
                             side.get("headers", {}).pop("content-length", None)
                     classes_raw, detail_raw = compare(g, cc)
-                    classes, detail = compare(g, cc_t)
+                    classes, detail = compare(g_t, cc_t)
                     # THE FIRED ENTRIES' `allowed` SET DECIDES, NOT THE FACT THAT THEY FIRED. A
                     # transform firing on a cell only means its regex matched some text there; it
                     # says nothing about the OTHER classes that cell diverged in. This branch handed
