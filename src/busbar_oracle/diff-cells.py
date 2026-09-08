@@ -148,7 +148,11 @@ def money_at_cell(fam: str) -> set:
 # entry would otherwise be. See `additive_superset()`/`additive_headers_superset()` below for the
 # proof, and the fired-additive branch in `main()` for where a failed proof leaves the cell red
 # rather than silently falling back to an ordinary acceptance.
-ADDITIVE_CLASSES = {"body", "headers"}
+ADDITIVE_CLASSES = {"body", "headers", "effects.stderr"}
+# The classes `additive` may take WITHOUT declaring `text_list_growth`. `effects.stderr` has no
+# JSON-superset relation at all — it is a raw string — so it is refused at load unless the entry
+# opts into the text_list_growth check specifically (see below).
+ADDITIVE_JSON_CLASSES = {"body", "headers"}
 
 
 def body_as_json(body) -> tuple:
@@ -228,6 +232,96 @@ def additive_headers_superset(gh: dict, ch: dict, body_ok: bool) -> str | None:
         if k not in ch2 or ch2[k] != v:
             return k
     return None
+
+
+# ── `text_list_growth` — THE SAME PROOF, FOR A LIST NAMED IN PROSE INSTEAD OF JSON ────────────────
+# A body/stderr that says "expected `groups`, `hooks`, `root`, or `plugin_versions`" carries the
+# same kind of growth as a JSON array: a NEW key-list entry (`identity-providers`) appended to an
+# enum. But there is no JSON structure to walk — the list lives inside one sentence, and the rest
+# of that sentence (the template, "expected", the trailing punctuation) is exactly the part that
+# must NOT be allowed to move for free, or additive would launder a genuinely reworded message
+# (`admin.ops|DeleteOverlaySection|not-found` changed "expected" to "expected one of" IN ADDITION
+# TO growing the list — that rewording must still be red).
+_LIST_ITEM_RX = re.compile(r"`([^`]*)`")
+# One item, then one-or-more more items joined by ", or ", " or ", or ", " — tried longest-first so
+# ", or " is not swallowed as a bare ", ". At least two items: a single `token` in prose is not "a
+# list", it is just a quoted word.
+_LIST_RUN_RX = re.compile(r"`[^`]*`(?:(?:, or | or |, )`[^`]*`)+")
+
+
+def find_backtick_lists(text: str) -> list:
+    """[(start, end, [item, ...]), ...] for every maximal backtick-quoted list run in `text`, in
+    the order they appear."""
+    out = []
+    for m in _LIST_RUN_RX.finditer(text):
+        out.append((m.start(), m.end(), _LIST_ITEM_RX.findall(m.group(0))))
+    return out
+
+
+def _first_diff_byte(a: str, b: str) -> int:
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return min(len(a), len(b))
+
+
+def text_list_growth_check(golden: str, cand: str) -> tuple:
+    """(removed, note). `removed` is the list of items present in `cand`'s list but not `golden`'s
+    — reported on the accepted row — and is None on failure, where `note` names why.
+
+    The relation: find every backtick-list run in each text (same count, same order, or refused —
+    "growth in two lists" below); every run except AT MOST ONE must be byte-identical between the
+    two texts; the ONE run that differs must hold golden's items as a PREFIX, in order (an item
+    removed, reordered, or inserted before the end breaks this); and — the actual proof — splicing
+    GOLDEN's own raw list text back into `cand` at that run's position must reproduce `golden`
+    BYTE FOR BYTE. That last step is what catches a reworded template: the surrounding sentence is
+    never inspected on its own terms, only through whether putting golden's list back closes the
+    gap completely. A `\\d+`-shaped hole around the list — different wording before or after it —
+    fails this splice exactly where the wording starts to differ."""
+    if golden == cand:
+        return [], None
+    g_lists, c_lists = find_backtick_lists(golden), find_backtick_lists(cand)
+    if len(g_lists) != len(c_lists):
+        return None, (f"additive: text_list_growth could not pair the golden and candidate lists "
+                       f"(golden has {len(g_lists)}, candidate has {len(c_lists)})")
+    if not g_lists:
+        i = _first_diff_byte(golden, cand)
+        return None, f"additive: not a superset at text byte {i} (no backtick list found)"
+    changed = []
+    for i, (g_l, c_l) in enumerate(zip(g_lists, c_lists)):
+        if g_l[2] != c_l[2]:
+            changed.append(i)
+    if len(changed) > 1:
+        return None, ("additive: text_list_growth touched more than one backtick list — one "
+                       "declared list per entry keeps the check narrow; split it into two entries")
+    if not changed:
+        # every list is byte-identical item-for-item; the texts still differ, so the difference is
+        # in the surrounding prose, not in any list at all.
+        i = _first_diff_byte(golden, cand)
+        return None, f"additive: not a superset at text byte {i}"
+    k = changed[0]
+    gs, ge, gitems = g_lists[k]
+    cs, ce, citems = c_lists[k]
+    mismatch = next((i for i in range(len(gitems)) if i >= len(citems) or citems[i] != gitems[i]), None)
+    if mismatch is not None:
+        got = repr(citems[mismatch]) if mismatch < len(citems) else "<missing>"
+        return None, (f"additive: not a superset at list item {mismatch} ({got} != {gitems[mismatch]!r}, "
+                       f"golden's items are not a prefix of the candidate's)")
+    if len(citems) <= len(gitems):
+        return None, "additive: not a superset (candidate's list added no new items)"
+    # every OTHER list must be byte-identical, not merely item-identical — a re-ordered "or"/comma
+    # around unrelated, unchanged items is still a template change this check must not launder.
+    for i, (g_l, c_l) in enumerate(zip(g_lists, c_lists)):
+        if i == k:
+            continue
+        if golden[g_l[0]:g_l[1]] != cand[c_l[0]:c_l[1]]:
+            return None, f"additive: not a superset at text byte {_first_diff_byte(golden, cand)}"
+    # THE PROOF: splice golden's own raw list text back into the candidate at the grown run's
+    # position. If what remains is not byte-identical to golden, the difference is not the list.
+    reconciled = cand[:cs] + golden[gs:ge] + cand[ce:]
+    if reconciled != golden:
+        return None, f"additive: not a superset at text byte {_first_diff_byte(golden, reconciled)}"
+    return citems[len(gitems):], None
 
 # ── THE ONE EXEMPTION FROM `norm.rules`, AND THE ONLY KIND OF RULE ALLOWED INTO IT ───────────────
 # `norm.rules` exists because a normalizer rule that fires on ONE side is itself a finding: content
@@ -406,7 +500,9 @@ def allowed_classes(kind: str, classes: set) -> set:
     if kind == "breaking":
         return set(CLASS_ORDER) - {"missing.golden"}
     if kind == "additive":
-        return set(ADDITIVE_CLASSES)
+        # `effects.stderr` is NEVER a default — it has no JSON-superset relation (a raw string) and
+        # is only ever reachable by naming it explicitly alongside `text_list_growth: true`.
+        return set(ADDITIVE_JSON_CLASSES)
     return set(CLASS_ORDER) - MONEY_CLASSES - {"missing.golden"}
 
 
@@ -614,7 +710,10 @@ def first_diff_text(classes, detail) -> str:
     d = detail.get(k)
     if d is None and detail.get("accepted.transform"):
         return f"{k}: identical after the accepted rewrite {detail['accepted.transform']}"
-    if k in ("body", "headers") and detail.get("additive.rejected"):
+    if k in ADDITIVE_CLASSES and detail.get("additive.removed"):
+        items = [i for entry in detail["additive.removed"] for i in entry.get("removed", [])]
+        return ("additive: added " + ", ".join(dict.fromkeys(items))) if items else "additive: superset (no new items)"
+    if k in ADDITIVE_CLASSES and detail.get("additive.rejected"):
         return detail["additive.rejected"]
     if k == "status":
         return f"status {d['golden']} -> {d['candidate']}"
@@ -764,6 +863,17 @@ def main() -> int:
                     sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive but carries no `changelog` "
                              f"line — additive proves growth mechanically, but the growth itself is still a product "
                              f"change an owner must document, exactly as `breaking` requires.")
+                # `effects.stderr` (and a text `body`, under this flag) has NO JSON structure to walk
+                # — it is a raw string, and the only growth proof this file knows for a raw string is
+                # `text_list_growth`: one backtick-quoted comma list in the candidate holds golden's
+                # items as a prefix, everything else byte-identical. Naming `effects.stderr` without
+                # opting into that check would otherwise fall through to `body_as_json()`, which
+                # would just report "not JSON on both sides" for every cell forever — a silent no-op
+                # acceptance that never fires is worse than a refusal at load.
+                if "effects.stderr" in base["allowed"] and not e.get("text_list_growth"):
+                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and names "
+                             f"'effects.stderr', which has no JSON-superset relation. Set "
+                             f"`text_list_growth: true` to use the backtick-list-growth proof instead.")
             if "cells" not in e and not base["classes"] and "transform" not in e:
                 sys.exit(f"accepted-differences: entry {base['id']!r} has neither cells nor classes (a total blanket)")
             # A TRANSFORM IS NOT EXEMPT FROM HAVING A SCOPE. `cells` defaulted to "." for every entry,
@@ -833,6 +943,7 @@ def main() -> int:
                 # genuinely absent, and letting it grow ANYWHERE for free would let additive quietly
                 # cover a value that was never populated instead of one that is provably unchanged.
                 base["null_to_value"] = set(e.get("null_to_value", []))
+                base["text_list_growth"] = bool(e.get("text_list_growth", False))
                 additive.append(base)
             else:
                 accepted.append(base)
@@ -1035,6 +1146,7 @@ def main() -> int:
             # cell stays red) and records WHERE it failed, so the row never has to guess whether
             # "additive" fired or simply matched.
             additive_note = None
+            additive_removed = []
             if need & ADDITIVE_CLASSES:
                 for e in additive:
                     if not e["rx"].search(cid):
@@ -1044,22 +1156,49 @@ def main() -> int:
                         continue
                     claimed, body_ok = set(), False
                     if "body" in want:
-                        gj, gok = body_as_json(g.get("body"))
-                        cj, cok = body_as_json(cc.get("body"))
-                        if gok and cok:
-                            bad = additive_superset(gj, cj, "", e["null_to_value"])
-                            if bad is None:
-                                claimed.add("body"); body_ok = True
+                        if e["text_list_growth"]:
+                            gtext = g.get("body", {}).get("text") if isinstance(g.get("body"), dict) else None
+                            ctext = cc.get("body", {}).get("text") if isinstance(cc.get("body"), dict) else None
+                            if isinstance(gtext, str) and isinstance(ctext, str):
+                                removed, note = text_list_growth_check(gtext, ctext)
+                                if removed is not None:
+                                    claimed.add("body"); body_ok = True
+                                    if removed:
+                                        additive_removed.append({"entry": e["id"], "class": "body", "removed": removed})
+                                else:
+                                    additive_note = note
                             else:
-                                additive_note = f"additive: not a superset at {bad}"
+                                additive_note = "additive: body has no text on both sides for text_list_growth"
                         else:
-                            additive_note = "additive: body is not JSON on both sides"
+                            gj, gok = body_as_json(g.get("body"))
+                            cj, cok = body_as_json(cc.get("body"))
+                            if gok and cok:
+                                bad = additive_superset(gj, cj, "", e["null_to_value"])
+                                if bad is None:
+                                    claimed.add("body"); body_ok = True
+                                else:
+                                    additive_note = f"additive: not a superset at {bad}"
+                            else:
+                                additive_note = "additive: body is not JSON on both sides"
                     if "headers" in want:
                         bad = additive_headers_superset(g.get("headers", {}), cc.get("headers", {}), body_ok)
                         if bad is None:
                             claimed.add("headers")
                         else:
                             additive_note = f"additive: not a superset at header {bad!r}"
+                    if "effects.stderr" in want:
+                        gtext = (g.get("effects") or {}).get("stderr")
+                        ctext = (cc.get("effects") or {}).get("stderr")
+                        if isinstance(gtext, str) and isinstance(ctext, str):
+                            removed, note = text_list_growth_check(gtext, ctext)
+                            if removed is not None:
+                                claimed.add("effects.stderr")
+                                if removed:
+                                    additive_removed.append({"entry": e["id"], "class": "effects.stderr", "removed": removed})
+                            else:
+                                additive_note = note
+                        else:
+                            additive_note = "additive: effects.stderr missing on one side"
                     if claimed:
                         cover.append(e); need -= claimed
                     if not need:
@@ -1071,6 +1210,12 @@ def main() -> int:
                     "rationale": " | ".join(e["rationale"] for e in cover),
                     "by": ", ".join(dict.fromkeys(e["by"] for e in cover)),
                 }
+                if additive_removed:
+                    # THE ROW SAYS WHAT GREW, NOT JUST THAT SOMETHING DID. additive proves a
+                    # superset mechanically; the items it proved were new are exactly the fact an
+                    # owner reading the ledger needs, so they ride on the row rather than living
+                    # only in the register entry's rationale.
+                    detail = {**detail, "additive.removed": additive_removed}
             elif additive_note:
                 # THE CELL STAYS RED, BUT NOT SILENTLY: an additive entry matched and was tried, and
                 # this is exactly where it stopped being a superset. Attached rather than replacing
