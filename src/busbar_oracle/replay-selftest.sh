@@ -482,6 +482,113 @@ EOF
   fi
 done
 
+# (qq) `additive` — A THIRD REGISTER KIND FOR GROWTH THE TOOL PROVES, NOT ONE AN OWNER ASSERTS.
+# F-011's admin.ops views (GetHooks, PostHooks, GetOpenapiJson, ...) are BODY_IS_CONTRACT, so
+# `improvement` can never take `body`/`headers` there (rated 10), and `breaking` would misdescribe a
+# response that dropped nothing and changed no existing value. `additive` may take `body`/`headers`
+# ONLY when additive_superset()/additive_headers_superset() prove the candidate a superset of the
+# golden at every path the golden defines; a failed proof leaves the cell red and names where.
+qq_cells() {  # <out> — self|a|ok reclassified onto a BODY_IS_CONTRACT family, like busbar's admin.ops
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = "admin.ops"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+qq_cells "$W/qq-cells.json"
+cat >"$W/qq-accept.json" <<'JSON'
+{"accepted":[{"id":"QQ-1 additive view","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body","headers"],"changelog":"selftest: admin.ops views grow keys additively.","rationale":"selftest: F-011-shaped additive proof"}]}
+JSON
+
+# (qq1) candidate body adds a key beside every golden key/value unchanged, candidate headers add a
+# new header -> ACCEPTED, naming QQ-1, on a family where body/headers are rated 10.
+cp -R "$FIX" "$W/qq1-c"
+python3 - "$W/qq1-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["json"]["extra"] = True
+d["headers"]["x-new"] = "1"
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/qq1-c" --out "$W/out-qq1" --cells "$W/qq-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/qq-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-qq1.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-qq1/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$title_col" == *"QQ-1"* ]] \
+  && say PASS "additive accepts a superset body + an added header on a BODY_IS_CONTRACT family (the real F-011 shape)" \
+  || say FAIL "QQ-1 superset body/added header was not accepted: rc=$rc status=$status_col title=$title_col"
+
+# (qq2) a golden value CHANGED (not merely added-beside) -> still RED, naming the JSON path.
+cp -R "$FIX" "$W/qq2-c"
+python3 - "$W/qq2-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["json"]["usage"]["in"] = 99
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/qq2-c" --out "$W/out-qq2" --cells "$W/qq-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/qq-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-qq2.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-qq2/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"additive: not a superset at"* ]] && [[ "$diff_col" == *"/usage/in"* ]] \
+  && say PASS "additive refuses a cell where a golden value CHANGED, naming the path" \
+  || say FAIL "QQ-2 changed value was not red-with-path: rc=$rc status=$status_col diff='$diff_col'"
+
+# (qq3) an ADDED header is additive growth; a CHANGED header value is not -> RED, naming the header.
+cp -R "$FIX" "$W/qq3-c"
+python3 - "$W/qq3-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["headers"]["content-type"] = "text/plain"
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/qq3-c" --out "$W/out-qq3" --cells "$W/qq-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/qq-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-qq3.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-qq3/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"additive: not a superset at header"* ]] && [[ "$diff_col" == *"content-type"* ]] \
+  && say PASS "additive refuses a cell where a golden HEADER's value changed, naming the header" \
+  || say FAIL "QQ-3 changed header was not red-with-name: rc=$rc status=$status_col diff='$diff_col'"
+
+# (qq4) a status change beside an otherwise-superset body -> still RED [status]; additive never
+# touches status (it is not in ADDITIVE_CLASSES), so the row reports the real status divergence,
+# not an additive rejection.
+cp -R "$FIX" "$W/qq4-c"
+python3 - "$W/qq4-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["json"]["extra"] = True
+d["status"] = 201
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/qq4-c" --out "$W/out-qq4" --cells "$W/qq-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/qq-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-qq4.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-qq4/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" == status* ]] \
+  && say PASS "a status change beside a superset body still stays RED [status], never taken by additive" \
+  || say FAIL "QQ-4 status-beside-superset-body was not red: rc=$rc status=$status_col title=$title_col"
+
+# (qq5) an additive entry naming `status` is refused at LOAD — additive is defined for body/headers
+# only, and there is no superset relation for a status code.
+cat >"$W/qq5-accept.json" <<'JSON'
+{"accepted":[{"id":"QQ-5 bad status","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["status"],"changelog":"x","rationale":"y"}]}
+JSON
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$FIX" --out "$W/out-qq5" --cells "$W/qq-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/qq5-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-qq5.log" 2>&1
+rc=$?
+grep -qi "kind=breaking\|additive" "$W/out-qq5.log" && msg_ok=1 || msg_ok=0
+[ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
+  && say PASS "an additive entry naming 'status' is refused at load" \
+  || say FAIL "QQ-5 additive-naming-status was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-qq5.log)"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
