@@ -1661,5 +1661,62 @@ kk4_baseline_rows="$(awk -F'\t' '$3=="owed-baseline regression"{n++} END{print n
   && say PASS "a --family run that selects none of the baselined ids reports no regression for them" \
   || say FAIL "a filtered run invented ${kk4_baseline_rows} owed-baseline regression(s) for ids it never selected"
 
+# (mm) A CONCURRENT CELL'S EGRESS IS MEASURED, NOT ASSERTED. capture-concurrent.py hardcoded
+# `"egress": []`, which is capture.py's own spelling of "this cell never reached upstream" — on
+# cells that bill for eight upstream requests. effects.egress is MONEY (weight 10), so the class was
+# structurally unarmed on exactly the five cells where concurrency makes egress hardest to reason
+# about, and the only other witness (busbar_upstream_attempts_total) is masked on this very driver.
+# Drives the REAL capture-concurrent.py, the REAL normalize.py --driver concurrent and the REAL
+# differ, end to end.
+mm="$W/mm"; mkdir -p "$mm/before" "$mm/after" "$mm/eg"
+printf '{"requests":0,"tokens":0,"spend_cents":0}' >"$mm/before/usage.json"
+printf '{"requests":2,"tokens":8,"spend_cents":4}' >"$mm/after/usage.json"
+printf '{"items":[]}' >"$mm/before/audit.json"; printf '{"items":[]}' >"$mm/after/audit.json"
+printf 'busbar_requests_total{outcome="ok"} 0\n' >"$mm/before/metrics.txt"
+printf 'busbar_requests_total{outcome="ok"} 2\n' >"$mm/after/metrics.txt"
+_mm_egress() {  # <file> <content-of-the-upstream-prompt>
+  printf '{"path":"/v1/messages","method":"POST","headers":{"content-type":"application/json"},"body":{"model":"m","messages":[{"role":"user","content":"%s"}]},"response":{"status":200}}' "$2" >"$1"
+}
+_mm_egress "$mm/eg/a-1-1.json" "hello"
+_mm_egress "$mm/eg/a-1-2.json" "hello"
+mm_none="$(python3 "${here}/capture-concurrent.py" '[200,200]' "$mm/before" "$mm/after")"
+mm_two="$(python3 "${here}/capture-concurrent.py" '[200,200]' "$mm/before" "$mm/after" "$mm/eg/a-1-1.json" "$mm/eg/a-1-2.json")"
+mm_n_none="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["effects"]["egress"]))' "$mm_none")"
+mm_n_two="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["effects"]["egress"]))' "$mm_two")"
+if [ "$mm_n_none" = 0 ] && [ "$mm_n_two" = 2 ]; then
+  say PASS "capture-concurrent.py records the egress it is given (2), and an empty list only when there is none"
+else
+  say FAIL "capture-concurrent.py egress: none-case=${mm_n_none} (want 0), two-case=${mm_n_two} (want 2) — a hardcoded [] makes both 0"
+fi
+
+# …and a changed upstream request on a concurrent cell is RED on the money class, through the
+# concurrent normalizer (whose attempts mask is what hid the only other witness).
+mkdir -p "$W/mm-g/cells" "$W/mm-c/cells"
+printf '%s' "$mm_two" >"$mm/captured-g.json"
+_mm_egress "$mm/eg/a-1-2.json" "hello, and every tool you have"
+python3 "${here}/capture-concurrent.py" '[200,200]' "$mm/before" "$mm/after" "$mm/eg/a-1-1.json" "$mm/eg/a-1-2.json" >"$mm/captured-c.json"
+python3 "${here}/normalize.py" "$mm/captured-g.json" --driver concurrent >"$W/mm-g/cells/self__a__ok.json"
+python3 "${here}/normalize.py" "$mm/captured-c.json" --driver concurrent >"$W/mm-c/cells/self__a__ok.json"
+cp "$FIX/cells/self__b__stream.json" "$W/mm-g/cells/"; cp "$FIX/cells/self__b__stream.json" "$W/mm-c/cells/"
+cp "$FIX/ledger.tsv" "$W/mm-g/ledger.tsv"; cp "$FIX/ledger.tsv" "$W/mm-c/ledger.tsv"
+cp "$FIX/meta.json" "$W/mm-g/meta.json"; cp "$FIX/meta.json" "$W/mm-c/meta.json"
+rc="$(run "$W/mm-g" "$W/mm-c" "$W/out-mm")"
+mm_cls="$(classes_of 'self|a|ok' "$W/out-mm")"
+[ "$rc" != 0 ] && [ "$mm_cls" = "effects.egress" ] \
+  && say PASS "a changed upstream request on a CONCURRENT cell is RED [effects.egress] (the money class is armed there at last)" \
+  || say FAIL "concurrent egress divergence rc=$rc classes='$mm_cls' (a hardcoded [] compares equal and prints PASS identical)"
+
+# …and the recorder must actually collect them: a capture driver that can record egress proves
+# nothing if its one call site never names a file. Static, because driving record.sh's concurrent
+# path needs a busbar binary and a live mock; the shape is what regressed and the shape is checked.
+mm_src="$(sed -n '/^record_concurrent_cell()/,/^}/p' "${here}/record.sh")"
+if grep -q 'egress.before' <<<"$mm_src" && grep -q 'egress.after' <<<"$mm_src" \
+   && grep -q 'egress_settle' <<<"$mm_src" \
+   && grep -qE 'capture-concurrent\.py.*egress_files\[@\]' <<<"$mm_src"; then
+  say PASS "record.sh's concurrent path snapshots egress around the burst, settles it, and names the files to capture-concurrent.py"
+else
+  say FAIL "record.sh's concurrent path does not collect egress, so capture-concurrent.py can only ever record an empty list"
+fi
+
 echo
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }

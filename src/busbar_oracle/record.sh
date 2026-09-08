@@ -832,6 +832,11 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
       || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; return; }
   fi
   settle_then_snapshot "$raw/before" "$kid"
+  # THE EGRESS OF A CONCURRENT CELL IS A MEASUREMENT, NOT A LITERAL. capture-concurrent.py used to
+  # hardcode `"egress": []`, which is capture.py's own spelling of "this cell must never reach
+  # upstream" — asserted of cells that bill for eight upstream requests. Same before/after listing
+  # the single-request path does, so the two drivers agree on what an egress record is.
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.before"
   mkdir -p "$raw/par"
   local pids=() i
   for ((i = 1; i <= cn; i++)); do
@@ -842,6 +847,12 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
   for p in "${pids[@]}"; do wait "$p" 2>/dev/null; done
   settle_then_snapshot "$raw/after" "$kid"
   clear_control_or_die "$id"
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.after"
+  local -a egress_files=()
+  while IFS= read -r f; do [ -n "$f" ] && egress_files+=("$WORK/egress/$f"); done < <(LC_ALL=C comm -13 "$raw/egress.before" "$raw/egress.after")
+  # …and each record must have its upstream RESPONSE before it is read, exactly as the single-request
+  # path requires: a record captured request-only would otherwise differ by which timer won on the day.
+  egress_settle "$id" "${egress_files[@]}"
   # each par/<i>.status file holds exactly the one %{http_code} curl wrote for that request; a
   # missing/empty file (curl itself never got a status line) counts as 0, same convention capture.py
   # uses for "no HTTP response" elsewhere in this recorder.
@@ -872,7 +883,7 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
   fi
   statuses="$(printf '%s\n' "${codes[@]}" | sort -n | paste -sd, - | sed 's/^/[/; s/$/]/')"
   printf '%s\n' "$statuses" >"$raw/statuses.json"
-  if ! python3 "${here}/capture-concurrent.py" "$statuses" "$raw/before" "$raw/after" >"$raw/captured.json" 2>"$raw/capture.err"; then
+  if ! python3 "${here}/capture-concurrent.py" "$statuses" "$raw/before" "$raw/after" "${egress_files[@]}" >"$raw/captured.json" 2>"$raw/capture.err"; then
     record "$id" FAIL "capture-concurrent.py failed" "$(tail -c 300 "$raw/capture.err")"; return
   fi
   printf '%s\n' "$kid" >"$raw/key-id"   # so renormalize.sh can re-run this cell faithfully
@@ -1069,7 +1080,7 @@ PY
         || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; continue; }
     fi
     settle_then_snapshot "$raw/before" "$kid"
-    ls "$WORK/egress" 2>/dev/null | sort >"$raw/egress.before"
+    ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.before"
     k=1
     while [ "$k" -le "$repeat" ]; do
       status="$(curl -sS -m 30 -N "${local_m[@]}" "http://127.0.0.1:${port}${path}" "${hdr_args[@]}" \
@@ -1113,16 +1124,16 @@ PY
       || { record "$id" FAIL "mock control write never landed" "wrote 'down' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; continue; }
   fi
   settle_then_snapshot "$raw/before" "$kid"
-  ls "$WORK/egress" 2>/dev/null | sort >"$raw/egress.before"
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.before"
   status="$(curl -sS -m 20 -N -X POST "http://127.0.0.1:${LISTEN_PORT}${path}" "${hdr_args[@]}" \
     --data-binary @"$raw/request.body" -D "$raw/headers" -o "$raw/body" -w '%{http_code}' 2>"$raw/curl.err")"; curl_rc=$?
   case "$curl_rc:$status" in 0:*|18:[1-5]??|56:[1-5]??) printf '%s\n' "$curl_rc" >"$raw/curl.rc" ;; *) status="000" ;; esac
   fi
   settle_then_snapshot "$raw/after" "$kid"
   clear_control_or_die "$id"
-  ls "$WORK/egress" 2>/dev/null | sort >"$raw/egress.after"
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.after"
   egress_files=()
-  while IFS= read -r f; do [ -n "$f" ] && egress_files+=("$WORK/egress/$f"); done < <(comm -13 "$raw/egress.before" "$raw/egress.after")
+  while IFS= read -r f; do [ -n "$f" ] && egress_files+=("$WORK/egress/$f"); done < <(LC_ALL=C comm -13 "$raw/egress.before" "$raw/egress.after")
   egress_settle "$id" "${egress_files[@]}"
   printf '%s\n' "$status" >"$raw/status"
   printf '%s\n' "$kid" >"$raw/key-id"
