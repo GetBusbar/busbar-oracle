@@ -148,11 +148,16 @@ def money_at_cell(fam: str) -> set:
 # entry would otherwise be. See `additive_superset()`/`additive_headers_superset()` below for the
 # proof, and the fired-additive branch in `main()` for where a failed proof leaves the cell red
 # rather than silently falling back to an ordinary acceptance.
-ADDITIVE_CLASSES = {"body", "headers", "effects.stderr"}
+ADDITIVE_CLASSES = {"body", "headers", "effects.stderr", "status"}
 # The classes `additive` may take WITHOUT declaring `text_list_growth`. `effects.stderr` has no
 # JSON-superset relation at all — it is a raw string — so it is refused at load unless the entry
 # opts into the text_list_growth check specifically (see below).
 ADDITIVE_JSON_CLASSES = {"body", "headers"}
+# `status` is the one class `additive` may EVER take that is also in MONEY_CLASSES, and only under
+# `new_route` (see below): a route that did not exist in 1.5.5 (golden 404, the 1.5.5 not-found
+# envelope) now answers is not a superset of anything — there is no relation between a stub refusal
+# and a real response — so it is its own gate, not a widening of additive_superset().
+ADDITIVE_STATUS_CLASSES = {"status"}
 
 
 def body_as_json(body) -> tuple:
@@ -198,6 +203,19 @@ def resolve_json_pointer(doc, pointer: str) -> tuple:
         else:
             return False, None
     return True, cur
+
+
+def is_1_5_5_not_found_envelope(body_json) -> bool:
+    """Whether `body_json` is shaped like 1.5.5's not-found response: a JSON object whose ONLY
+    top-level key is `error`, itself an object carrying a string `message` (busbar's real 404
+    bodies, e.g. `{"error": {"code": "not_found", "message": "hook `x` not found"}}` —
+    `code`/`param`/`type` vary or are absent, `message` never is). This is `new_route`'s gate: a
+    route 1.5.5 did not have answered with exactly this stub, never a real payload, so a candidate
+    that now answers for real cannot be compared against it by ANY relation — not a superset, not a
+    growth, not a correction. There is nothing to walk; the golden body's SHAPE is the only thing
+    that says "this route was a stub", so that shape is all this checks."""
+    return (isinstance(body_json, dict) and set(body_json.keys()) == {"error"}
+            and isinstance(body_json["error"], dict) and isinstance(body_json["error"].get("message"), str))
 
 
 def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs: list | None = None,
@@ -778,6 +796,8 @@ def first_diff_text(classes, detail) -> str:
                 parts.append(f"added {', '.join(dict.fromkeys(items))}{where}")
             for corr_path, gtext, ctext in entry.get("corrections") or []:
                 parts.append(f"corrected {corr_path}: {gtext!r} -> {ctext!r}")
+            if entry.get("note"):
+                parts.append(entry["note"])
         return ("additive: " + "; ".join(parts)) if parts else "additive: superset (no new items)"
     if k in ADDITIVE_CLASSES and detail.get("additive.rejected"):
         return detail["additive.rejected"]
@@ -906,7 +926,15 @@ def main() -> int:
             if "missing.golden" in base["classes"]:
                 sys.exit(f"accepted-differences: entry {base['id']!r} accepts 'missing.golden' — a golden ledger row that says PASS for a cell the golden did not write is a recorder bug, never an acceptable difference; re-record the golden")
             money = base["allowed"] & MONEY_CLASSES
-            if money and not (base["kind"] == "breaking" and e.get("changelog")):
+            # `additive`'s ONE exception to "only `breaking` may touch money": `new_route`, and only
+            # for `status`, and only with its own changelog line. A route that did not exist in
+            # 1.5.5 (golden 404, the 1.5.5 not-found envelope) now answering for real is not a
+            # behavioural CHANGE to declare `breaking` over — there is no previous behavior to
+            # compare the new one against — but it is still money (a status code), so it still needs
+            # a changelog line naming it, exactly as `breaking` would.
+            new_route_money_ok = (base["kind"] == "additive" and bool(e.get("new_route"))
+                                  and money <= ADDITIVE_STATUS_CLASSES and bool(e.get("changelog")))
+            if money and not (base["kind"] == "breaking" and e.get("changelog")) and not new_route_money_ok:
                 sys.exit(f"accepted-differences: entry {base['id']!r} accepts {sorted(money)} but is not kind=breaking with a changelog line")
             # `additive` IS NEVER A BLANK CHEQUE FOR MONEY, `breaking`'S CHANGELOG LINE DOES NOT
             # EXTEND TO IT. It is defined for exactly two classes — `body` and `headers` — and ONLY
@@ -940,6 +968,14 @@ def main() -> int:
                     sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and names "
                              f"'effects.stderr', which has no JSON-superset relation. Set "
                              f"`text_list_growth: true` to use the backtick-list-growth proof instead.")
+                # `status` is refused unless `new_route: true` is set — there is no superset relation
+                # for a status code (it is equal or it is a real divergence) OUTSIDE the one
+                # carve-out `new_route` names: a route 1.5.5 did not have (golden 404, the 1.5.5
+                # not-found envelope) now answering for real.
+                if "status" in base["allowed"] and not e.get("new_route"):
+                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and names "
+                             f"'status', which additive may only take when `new_route: true` is also "
+                             f"set (a route that did not exist in 1.5.5 now answers).")
                 # `description_corrections` NAMES A REAL STRING, NEVER A HYPOTHETICAL ONE. A pointer
                 # that does not resolve to a string leaf in ANY golden cell this entry matches is
                 # refused here — a typo'd path would otherwise silently forgive nothing (the leaf it
@@ -1047,6 +1083,7 @@ def main() -> int:
                 base["null_to_value"] = set(e.get("null_to_value", []))
                 base["text_list_growth"] = bool(e.get("text_list_growth", False))
                 base["description_corrections"] = set(e.get("description_corrections", []) or [])
+                base["new_route"] = bool(e.get("new_route", False))
                 additive.append(base)
             else:
                 accepted.append(base)
@@ -1258,6 +1295,27 @@ def main() -> int:
                     if not want:
                         continue
                     claimed, body_ok = set(), False
+                    # `new_route` IS ITS OWN GATE, CHECKED BEFORE ANY ORDINARY CLASS LOGIC — a route
+                    # that did not exist in 1.5.5 (golden 404, the 1.5.5 not-found envelope) now
+                    # answering for real bears no relation to the stub it replaced: not a superset,
+                    # not growth, not a correction. When the gate holds, whatever of
+                    # {status, headers, body} this entry is asked for is claimed WHOLESALE and taken
+                    # out of `want` before the ordinary per-class checks below ever see it. When it
+                    # does not hold — golden status is not 404, the golden body is not the stub
+                    # shape, or the candidate is 5xx — `want` is untouched and the ordinary rules
+                    # decide, exactly as if `new_route` had not been declared.
+                    if e["new_route"]:
+                        gj0, gok0 = body_as_json(g.get("body"))
+                        cstatus = cc.get("status")
+                        is_5xx = isinstance(cstatus, int) and not isinstance(cstatus, bool) and 500 <= cstatus < 600
+                        if g.get("status") == 404 and gok0 and is_1_5_5_not_found_envelope(gj0) and not is_5xx:
+                            new_claim = want & (ADDITIVE_STATUS_CLASSES | {"headers", "body"})
+                            if new_claim:
+                                claimed |= new_claim
+                                body_ok = "body" in new_claim
+                                additive_removed.append({"entry": e["id"], "class": "new_route",
+                                                         "note": f"new route: golden 404 -> candidate {cstatus}"})
+                                want = want - new_claim
                     if "body" in want:
                         gtext = g.get("body", {}).get("text") if isinstance(g.get("body"), dict) else None
                         ctext = cc.get("body", {}).get("text") if isinstance(cc.get("body"), dict) else None
