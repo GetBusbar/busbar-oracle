@@ -75,16 +75,26 @@
 #   testing/shadow-oracle/owed-baseline.txt: a rig's OWN verdict can shrink silently (a scenario the
 #   suite used to run quietly stops running, a flaky leg that used to pass is reported once and never
 #   looked at again) with nothing anywhere going red, because "PASS" simply stopped being asserted.
-#   `--rebaseline` accepts THIS run's rows as the new baseline and (re)writes the file. `--check` (the
-#   default once a baseline exists) diffs this run's rows against it:
+#   `--rebaseline` accepts THIS run's rows as the new baseline and (re)writes the file — and the diff
+#   below runs UNDER IT TOO, so a scenario that stopped executing cannot be signed off as the new
+#   floor by the same command that was supposed to notice it. `--check` demands the comparison
+#   happened at all: it refuses a run with no baseline to measure against, and refuses to be combined
+#   with `--rebaseline`. The diff runs unconditionally once a baseline exists:
 #     * a row that was PASS at baseline and is NOT PASS now is a REGRESSION — a synthetic
 #       `baseline|<id>` FAIL row is recorded and OWED, so verdict.sh reports it by name.
 #     * a row present now that was not in the baseline is NEW COVERAGE — printed, never gated.
+#     * a regression that is DELIBERATE is named on the command line: `--accept-baseline-loss <id>`,
+#       repeatable, which records a PASS row saying so instead of silently not looking.
+#     * NO BASELINE AT ALL is itself a red row (`baseline|_missing`), except under `--rebaseline`,
+#       which is the run that creates the first one. An absent baseline is an absent check.
+#     * a fold that THREW is a red row (`baseline|_fold_failed`), never an empty result read as
+#       "no regressions".
 #     * a row that was PASS at baseline and produced NO row at all this run is caught for free by the
 #       ordinary "did not run" path below (its id is added to what this run owes).
 #
 # USAGE
 #   rigs-ledger.sh --bin <busbar-binary> [--rebaseline] [--check] [--baseline <file>] [--work <dir>]
+#                  [--accept-baseline-loss <row-id>]...
 #   rigs-ledger.sh --selftest
 #
 # ARMING
@@ -112,6 +122,10 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 BIN="" REBASELINE=0 CHECK=0 SELFTEST=0
+# `--accept-baseline-loss <id>`, repeatable: a row that was PASS at the last sign-off and is
+# deliberately not expected any more. Same discipline as the oracle's other registers — a loss is
+# accepted BY NAME, in the command line of the commit that makes it, never by the absence of a check.
+ACCEPT_LOSS=""
 BASELINE="${data}/rigs-baseline.json"
 WORK="${RIGS_LEDGER_WORK:-${repo}/target/rigs-ledger}"
 
@@ -180,12 +194,28 @@ while [ $# -gt 0 ]; do
     --rebaseline) REBASELINE=1; shift ;;
     --check) CHECK=1; shift ;;
     --selftest) SELFTEST=1; shift ;;
+    --accept-baseline-loss) ACCEPT_LOSS="${ACCEPT_LOSS} $2"; shift 2 ;;
     --baseline) BASELINE="$2"; shift 2 ;;
     --work) WORK="$2"; shift 2 ;;
     --help|-h) usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 2 ;;
   esac
 done
+
+# ── `--check` MEANS THE BASELINE COMPARISON HAPPENED ────────────────────────────────────────────
+# It was parsed into a variable nothing ever read: `grep -n CHECK` found the initialisation and the
+# parse arm and no third line. scripts/verify-1.6.0-done.sh passes it believing it demands the
+# comparison against the last sign-off — so the one caller that asked for the check out loud got
+# exactly the same run as one that did not, including the silent no-baseline path above.
+#
+# Now it is a promise about the run, enforced BEFORE anything expensive starts: there must be a
+# baseline to compare against, and this must not be the command that rewrites it.
+if [ "$CHECK" = 1 ]; then
+  [ "$REBASELINE" != 1 ] \
+    || die "--check and --rebaseline are contradictory: --check demands this run be MEASURED against the last sign-off, --rebaseline REPLACES it. Pick one."
+  [ -s "$BASELINE" ] \
+    || die "--check demands a baseline comparison and ${BASELINE} is absent or empty, so there is nothing to compare against. Sign one off with --rebaseline on a green tree first."
+fi
 
 # ── PER-LEG FLOORS ────────────────────────────────────────────────────────────────────────────────
 # Every leg below is guarded against a folder that THREW (`_fold_failed`), and against a fold that
@@ -224,6 +254,61 @@ run_leg() {
     return 0
   fi
   say "   ${label}: ${got} row(s) (floor ${floor})"
+}
+
+# ── FOLDING THE BASELINE IN IS A DECISION, AND EVERY WAY IT CAN GO WRONG IS A ROW ───────────────
+# Three separate fail-open paths lived here, and each of them turned the whole regression check off
+# without a word:
+#
+#   * the fold's EXIT STATUS was never captured — alone among this file's five folds — so a python
+#     that died on a malformed baseline produced no rows, and `if [ -n "$rows" ]` read that silence
+#     as "nothing regressed". A corrupt baseline left all 190 signed-off rows unchecked, and green.
+#   * a MISSING baseline was a `say` line. No row, no owed id, nothing red. With `--data` optional
+#     and no rigs-baseline.json shipped, a mistyped path silently disabled the comparison.
+#   * `--rebaseline` skipped the diff entirely, so it blocked signing off a FAIL and happily signed
+#     off an ABSENCE: a scenario that stopped executing became the new floor with nothing red.
+#
+# All three fail closed here, in one function, which the self-test drives directly — the reason the
+# first of them survived is that the only thing being exercised was the fold, never its caller.
+# SETS THE GLOBAL `baseline_owed` (never prints it: this function also `say`s, and a caller that
+# captured its stdout would fold the prose into the owed set). Same shape as run_mcp/run_voice,
+# which append to `owed_ids` the same way. Records its own rows through `record`.
+fold_baseline_into_ledger() {  # <ledger> <baseline> <rebaseline?> <errfile> <accepted-loss-ids>
+  local ledger="$1" baseline="$2" rebaseline="$3" errfile="$4" accept_loss="${5-}"
+  local rows fold_rc owed="" id status title detail
+  baseline_owed=""
+  if [ -s "$baseline" ]; then
+    say "== baseline check against $(basename "$baseline") =="
+    rows="$(fold_baseline_regressions "$ledger" "$baseline" 2>"$errfile")"; fold_rc=$?
+    if [ "$fold_rc" -ne 0 ]; then
+      record "baseline|_fold_failed" FAIL "the baseline could not be folded into the ledger (exit ${fold_rc})" \
+        "$(basename "$baseline") is the record of what passed at the last sign-off; a fold that threw checks NOTHING against it, and every row it would have owed is unexamined: $(tail -c 300 "$errfile" 2>/dev/null | tr '\n' ' ')" >/dev/null
+      baseline_owed=" baseline|_fold_failed"
+      return 0
+    fi
+    if [ -n "$rows" ]; then
+      while IFS=$'\t' read -r id status title detail; do
+        [ -n "$id" ] || continue
+        case " ${accept_loss} " in
+          *" ${id} "*)
+            record "baseline|$id" PASS "ACCEPTED baseline loss: $title" \
+              "named on the command line with --accept-baseline-loss ${id}" >/dev/null ;;
+          *)
+            record "baseline|$id" "$status" "$title" "$detail" >/dev/null ;;
+        esac
+        owed="${owed} baseline|$id"
+      done <<<"$rows"
+    fi
+  elif [ "$rebaseline" = 1 ]; then
+    # The ONE case where an absent baseline is not a finding: this run exists to create the first one.
+    say "== no baseline at ${baseline} yet -- this run signs the first one off =="
+  else
+    say "== NO BASELINE at ${baseline} =="
+    record "baseline|_missing" FAIL "no baseline to measure this run against" \
+      "${baseline} is absent or empty, so no rig row can be found to have regressed and this run is compared to nothing. Sign one off with --rebaseline on a green tree, or point --baseline at the right file (a mistyped --data reaches here as an absent baseline)." >/dev/null
+    owed=" baseline|_missing"
+  fi
+  baseline_owed="$owed"
 }
 
 # ── A RED RUN MAY NOT BE SIGNED OFF ───────────────────────────────────────────────────────────────
@@ -373,6 +458,96 @@ if [ "$SELFTEST" = 1 ]; then
       say "  MISS: --rebaseline on a green run did not write the baseline"
       failures=$((failures+1))
     fi
+    # RED 7: A CORRUPT BASELINE DISABLES NOTHING. The fold's exit status was never captured — alone
+    # among this file's five folds — and `if [ -n "$rows" ]` read the silence of a python that died
+    # on malformed JSON as "no regressions": every signed-off row unchecked, run green. Drives the
+    # REAL caller (fold_baseline_into_ledger), because the fold itself always did exit non-zero —
+    # what was missing was anyone asking.
+    local bl_ledger="$tmp/bl.tsv" bad_baseline="$tmp/corrupt-baseline.json" bl_owed baseline_owed=""
+    : >"$bl_ledger"
+    printf '{"rows": {"fake.rig|scenario-a": "PASS"' >"$bad_baseline"   # truncated on purpose
+    LEDGER="$bl_ledger" fold_baseline_into_ledger "$bl_ledger" "$bad_baseline" 0 "$tmp/bl.err" "" >/dev/null
+    bl_owed="$baseline_owed"
+    if case " $bl_owed " in *" baseline|_fold_failed "*) true ;; *) false ;; esac \
+       && awk -F'\t' '$1=="baseline|_fold_failed" && $2=="FAIL"{f=1} END{exit !f}' "$bl_ledger"; then
+      say "  ok: a corrupt baseline is a FAIL row AND an owed id, never an empty result read as 'nothing regressed'"
+    else
+      say "  MISS: a corrupt baseline produced no row and no owed id -- the whole regression check switches off silently (owed: '${bl_owed}')"
+      failures=$((failures+1))
+    fi
+
+    # RED 8: A MISSING BASELINE IS A MISSING CHECK. This was a `say` line: no row, no owed id,
+    # nothing red. An omitted or mistyped --data reaches here as an absent baseline and turned the
+    # comparison off for the whole run.
+    local miss_ledger="$tmp/miss.tsv" miss_owed
+    : >"$miss_ledger"
+    LEDGER="$miss_ledger" fold_baseline_into_ledger "$miss_ledger" "$tmp/not-here.json" 0 "$tmp/miss.err" "" >/dev/null
+    miss_owed="$baseline_owed"
+    if case " $miss_owed " in *" baseline|_missing "*) true ;; *) false ;; esac \
+       && awk -F'\t' '$1=="baseline|_missing" && $2=="FAIL"{f=1} END{exit !f}' "$miss_ledger"; then
+      say "  ok: no baseline at all is a FAIL row AND an owed id, not an advisory line"
+    else
+      say "  MISS: a missing baseline was advisory -- the run compared itself to nothing and could still be green (owed: '${miss_owed}')"
+      failures=$((failures+1))
+    fi
+    # …except under --rebaseline, which is the run that creates the first one. Fail-closed must not
+    # mean "the first baseline can never be signed off".
+    local boot_ledger="$tmp/boot.tsv" boot_owed
+    : >"$boot_ledger"
+    LEDGER="$boot_ledger" fold_baseline_into_ledger "$boot_ledger" "$tmp/not-here.json" 1 "$tmp/boot.err" "" >/dev/null
+    boot_owed="$baseline_owed"
+    if [ -z "$boot_owed" ] && [ ! -s "$boot_ledger" ]; then
+      say "  ok: --rebaseline with no baseline yet owes nothing (the first sign-off is still possible)"
+    else
+      say "  MISS: --rebaseline could not create the first baseline (owed: '${boot_owed}')"
+      failures=$((failures+1))
+    fi
+
+    # RED 9: `--rebaseline` RUNS THE DIFF. It used to skip it, so it refused to sign off a FAIL and
+    # signed off an ABSENCE without a word — a scenario that stopped executing became the new floor.
+    local rb_ledger="$tmp/rb2.tsv" rb2_baseline="$tmp/rb2-baseline.json" rb_owed
+    : >"$rb_ledger"
+    printf '{"rows":{"fake.rig|gone":"PASS","fake.rig|also-gone":"PASS"}}\n' >"$rb2_baseline"
+    LEDGER="$rb_ledger" fold_baseline_into_ledger "$rb_ledger" "$rb2_baseline" 1 "$tmp/rb2.err" "" >/dev/null
+    rb_owed="$baseline_owed"
+    if [ "$(awk -F'\t' '$2=="FAIL"{n++} END{print n+0}' "$rb_ledger")" = 2 ]; then
+      say "  ok: --rebaseline still measures against the last sign-off, so a vanished row is red before it can become the new floor"
+    else
+      say "  MISS: --rebaseline skipped the baseline diff, so two rows that stopped running would be signed off as the new expectation"
+      failures=$((failures+1))
+    fi
+    # …and a loss that is DELIBERATE is forgiven BY NAME, one id at a time, never by absence.
+    local acc_ledger="$tmp/acc.tsv"
+    : >"$acc_ledger"
+    LEDGER="$acc_ledger" fold_baseline_into_ledger "$acc_ledger" "$rb2_baseline" 1 "$tmp/acc.err" "fake.rig|gone" >/dev/null
+    if [ "$(awk -F'\t' '$2=="FAIL"{n++} END{print n+0}' "$acc_ledger")" = 1 ] \
+       && awk -F'\t' '$1=="baseline|fake.rig|gone" && $2=="PASS"{f=1} END{exit !f}' "$acc_ledger"; then
+      say "  ok: --accept-baseline-loss forgives exactly the row it names and leaves the other red"
+    else
+      say "  MISS: --accept-baseline-loss forgave the wrong number of rows"
+      failures=$((failures+1))
+    fi
+
+    # RED 10: `--check` is a promise about the run, not a flag that parses. It was written into a
+    # variable no line ever read, so the one caller that asked for the baseline comparison out loud
+    # got exactly the same run as one that did not. The refusals must name themselves, or a
+    # `--bin`-not-executable death would pass this case for the wrong reason.
+    local check_out
+    check_out="$(bash "$0" --bin /nonexistent --check --rebaseline 2>&1)"
+    if grep -q 'contradictory' <<<"$check_out"; then
+      say "  ok: --check with --rebaseline is refused by name (one measures against the sign-off, the other replaces it)"
+    else
+      say "  MISS: --check --rebaseline was not refused: a run that claimed to check the baseline rewrote it instead"
+      failures=$((failures+1))
+    fi
+    check_out="$(bash "$0" --bin /nonexistent --check --baseline "$tmp/does-not-exist.json" 2>&1)"
+    if grep -q 'demands a baseline comparison' <<<"$check_out"; then
+      say "  ok: --check with no baseline to measure against is refused by name, not run"
+    else
+      say "  MISS: --check ran with no baseline, i.e. it promised a comparison it could not make"
+      failures=$((failures+1))
+    fi
+
     # RED 5: a DECLARED voice leg that reports no row must be named as a FAIL. Drives the REAL
     # fold_declared_leg_floor above against a fixture legs dir, so the guard is proven to bite rather
     # than asserted to exist.
@@ -810,22 +985,10 @@ run_leg run_voice       "voice.rig|"      1 "voice conformance battery"
 # ── baseline: rebaseline, or diff against the last sign-off ─────────────────────────────────────
 # Uses fold_baseline_regressions(), defined once above (before --selftest, so --selftest drives the
 # same function rather than a copy of it).
-baseline_owed=""
-if [ "$REBASELINE" != 1 ] && [ -s "$BASELINE" ]; then
-  say ""
-  say "== baseline check against $(basename "$BASELINE") =="
-  baseline_rows="$(fold_baseline_regressions "$LEDGER" "$BASELINE")"
-  if [ -n "$baseline_rows" ]; then
-    while IFS=$'\t' read -r id status title detail; do
-      [ -n "$id" ] || continue
-      record "baseline|$id" "$status" "$title" "$detail" >/dev/null
-      baseline_owed="${baseline_owed} baseline|$id"
-    done <<<"$baseline_rows"
-  fi
-elif [ "$REBASELINE" != 1 ]; then
-  say ""
-  say "== no baseline at $BASELINE yet -- run with --rebaseline first to sign one off =="
-fi
+# The rule lives in fold_baseline_into_ledger(), defined once above (before --selftest, so the
+# self-test drives the same function rather than a copy of it).
+say ""
+fold_baseline_into_ledger "$LEDGER" "$BASELINE" "$REBASELINE" "${WORK}/baseline-fold.err" "$ACCEPT_LOSS"
 
 GATE_NAME="plane rigs" EXPECTED_IDS="${owed_ids}${baseline_owed}" LEDGER="$LEDGER" \
   bash "${repo}/testing/fleet-fixtures/verdict.sh"
