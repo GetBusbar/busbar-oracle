@@ -258,6 +258,38 @@ def entry_may_take(e: dict, money_here: set) -> set:
     return e["allowed"] - money_here
 
 
+def transform_pattern_too_broad(pattern: str) -> str | None:
+    """Why this transform pattern may not ship, or None if it is fine.
+
+    A transform is credited for a class the moment the rewritten pair is byte-identical (see the
+    fired-transform branch below): the rewrite is trusted to name EXACTLY the token it erases, and
+    nothing else. A pattern that can match the EMPTY STRING (`.*`, `\\s*`, `(.|\\n)*`, `x?`, `a{0,3}`)
+    or that names no literal text at all (`.`, `\\d+`, `.+`) is not a token — it is a shape that can
+    swallow arbitrary surrounding content, so "byte-identical after the rewrite" stops proving the
+    erased text was the accepted one and starts proving only that the pattern was wide enough. This
+    is checked at LOAD, over the pattern's source text, so a transform this broad refuses to load
+    rather than quietly widening what a rewrite may erase.
+
+    Matching-empty is checked directly: compile the pattern and ask whether it matches "". Having
+    "no literal text" is checked by stripping every regex construct that is not a literal character
+    — escapes (`\\d`, `\\s`, `\\n`, ...), character classes (`[...]`), groups and lookaround markers,
+    quantifiers (`* + ? {m,n}`), alternation (`|`) and anchors/dot (`^ $ .`) — and refusing if nothing
+    remains. Escaped literal punctuation (`\\.` meaning a literal dot, `\\-` meaning a literal hyphen)
+    is conservatively treated as non-literal too: a pattern with real intent to strip fixed text
+    reads as PLAIN characters somewhere in it (D-1's `diag=BUSBAR-\\d{4}` has "diag=BUSBAR-"), so
+    refusing on an escape-only pattern costs nothing a real acceptance needed."""
+    try:
+        rx = re.compile(pattern, re.M)
+    except re.error as e:
+        return f"does not compile: {e}"
+    if rx.match("") is not None:
+        return "can match the empty string (matches '')"
+    stripped = re.sub(r"\\.|\[[^\]]*\]|\((?:\?[:=!<]?)?|\)|[.^$*+?{}|]", "", pattern)
+    if not stripped:
+        return "names no literal text (only regex syntax/escapes/character classes)"
+    return None
+
+
 def allowed_classes(kind: str, classes: set) -> set:
     """The classes an accepted-differences entry may forgive — ONE definition, shared by the
     loader's money guard and the matcher below.
@@ -665,6 +697,13 @@ def main() -> int:
                 # diff, so ONLY the accepted token (a diagnostic code, a renamed line) is forgiven and any
                 # other change on the same line / cell still shows. Fires visibly: an identical-after-rewrite
                 # cell reports ACCEPTED with this id, never PASS.
+                for rx, _repl in e["transform"]["candidate"]:
+                    why = transform_pattern_too_broad(rx)
+                    if why:
+                        sys.exit(f"accepted-differences: entry {base['id']!r} transform pattern {rx!r} is refused: "
+                                 f"{why}. A transform is credited for a class the moment the rewritten pair is "
+                                 f"byte-identical, so its pattern must name a specific token, never a shape wide "
+                                 f"enough to swallow arbitrary content.")
                 base["transform"] = [(re.compile(rx, re.M), repl) for rx, repl in e["transform"]["candidate"]]
                 transforms.append(base)
             else:
@@ -795,11 +834,31 @@ def main() -> int:
                     # Now it does, jointly across the entries that fired (same rule as the non-
                     # transform matcher below): anything left over stays a divergence and is red.
                     if not classes and classes_raw:
-                        # …and the SAME per-cell money test the ordinary matcher applies. A fired
-                        # transform hands the cell's raw class list to the accepted column, so an
-                        # `improvement` transform on a boot-refusal cell could otherwise carry
-                        # `body` — rated 10 there — on the strength of having rewritten some text.
-                        cover_t = set().union(*(entry_may_take(t, money_at_cell(fam)) for t in fired))
+                        # `entry["allowed"]` decides, NOT `entry_may_take`'s FAMILY money subtraction.
+                        # This branch only runs when the TRANSFORMED pair is fully equal — `classes`
+                        # (compare(g_t, cc_t)) is empty — and a transform touches exactly two fields,
+                        # `effects.stderr` and `body.text` (plus the content-length shadow of the
+                        # latter). Every other field of `g_t`/`cc_t` is a verbatim copy of `g`/`cc`,
+                        # so compare() computed the SAME value for every class outside
+                        # {headers, body, effects.stderr} whether or not the transform ran. Full
+                        # equality post-transform therefore PROVES `classes_raw` cannot contain a
+                        # class the transform did not touch — `status`, `effects.usage`,
+                        # `effects.files`, and every other real money field would still show up in
+                        # `classes` (non-empty) if they had moved, and this branch would never run.
+                        # `money_at_cell()` exists to stop an `improvement` entry from being credited
+                        # for a class that is STILL DIFFERENT (the boot-refusal-stdout hole this file
+                        # was written against): that hole needs the family subtraction because the
+                        # content in question never became equal. Here it did, by construction of
+                        # what a transform is allowed to touch, so the ordinary global money guard —
+                        # already enforced at load, where an entry's `allowed` can never contain a
+                        # class in MONEY_CLASSES without `kind: breaking` and a changelog line — is
+                        # the whole of what's needed. Subtracting the family-rated set on top of that
+                        # (as before) refused a diagnostic-code-stripping `improvement` transform
+                        # credit for `body` on every BODY_IS_CONTRACT family (boot.warning,
+                        # boot.refusal, cli, config.migrate, admin.ops, ops.scrape) even though the
+                        # rewritten pair is byte-identical — nothing was forgiven, because nothing
+                        # was left to forgive.
+                        cover_t = set().union(*(t["allowed"] for t in fired))
                         unclaimed = [k for k in classes_raw if k not in cover_t]
                         if not unclaimed:
                             classes, detail = classes_raw, {"accepted.transform": [t["id"] for t in fired]}
