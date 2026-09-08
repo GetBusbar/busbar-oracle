@@ -179,16 +179,55 @@ def body_as_json(body) -> tuple:
     return None, False
 
 
+def ptr_escape(key: str) -> str:
+    """One reference token, escaped the way RFC 6901 says (0.3.10): `~` -> `~0` FIRST, then `/` ->
+    `~1`, so a key that contains a literal `~1` is not silently turned into a `/`.
+
+    This exists because the differ's own path convention was not a JSON pointer, it was a `/`-join —
+    and a JSON document whose KEYS contain slashes broke it in both directions at once. An OpenAPI
+    document is exactly that document: a `paths` key IS a URL, so `additive_superset` reported a leaf
+    as `/paths//api/v1/admin/overlay/{section}/delete/summary`, and `resolve_json_pointer` split that
+    back into segments (`paths`, ``, `api`, `v1`, ...) that name nothing. The register could not
+    address a single leaf of the one document busbar's largest admin cell records, and the failure
+    mode was the polite one only by luck: the 0.3.6 guard refused the entry at load rather than
+    letting a pointer sit there quietly covering nothing.
+
+    So the two halves now agree on the standard rather than on a convention: paths are BUILT escaped
+    (see additive_superset) and RESOLVED unescaped (below). A key with no `/` and no `~` in it —
+    every key in every other cell in the corpus — escapes to itself, so every path this file has ever
+    printed for such a document is byte-identical to what it printed before."""
+    return key.replace("~", "~0").replace("/", "~1")
+
+
+def ptr_unescape(token: str) -> str:
+    """One reference token, unescaped: `~1` -> `/` FIRST, then `~0` -> `~`. The order is the
+    standard's and it is not arbitrary — doing it the other way turns the escaped form of the
+    literal text `~1` into a slash."""
+    return token.replace("~1", "/").replace("~0", "~")
+
+
 def resolve_json_pointer(doc, pointer: str) -> tuple:
     """(found, value) for a `/a/b/0`-style JSON pointer against `doc`, in the SAME path convention
-    `additive_superset` builds (`""`/`"/"` is the root; a list index is its decimal string). Used to
-    validate a `description_corrections` entry AT LOAD, against the golden's own recorded body —
-    the register may only name a path that actually IS a string somewhere real, never a hypothetical
-    one a typo could silently mean nothing."""
+    `additive_superset` builds. Reference tokens are RFC 6901-escaped (0.3.10), so a key containing
+    a slash — an OpenAPI `paths` key, which is a URL — is addressable as
+    `/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/409/description`. A list index is
+    its decimal string; `""`/`"/"` is the root, which is this file's own convention and not the
+    standard's (RFC 6901 reads `/` as the empty-string KEY) — it is kept because it is what
+    `additive_superset` has always emitted for the root and nothing addresses an empty key here.
+
+    Used to validate a `description_corrections` entry AT LOAD, against the golden's own recorded
+    body — the register may only name a path that actually IS a string somewhere real, never a
+    hypothetical one a typo could silently mean nothing. A pointer that still resolves nowhere after
+    unescaping is still refused, exactly as before: the escaping widens what can be ADDRESSED, never
+    what can be missing."""
     if pointer in ("", "/"):
         return True, doc
+    parts = pointer.split("/")
+    if parts and parts[0] == "":
+        parts = parts[1:]  # a well-formed pointer starts with the separator, not with a token
     cur = doc
-    for part in pointer.lstrip("/").split("/"):
+    for raw in parts:
+        part = ptr_unescape(raw)
         if isinstance(cur, dict):
             if part not in cur:
                 return False, None
@@ -260,9 +299,15 @@ def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs:
         if not isinstance(cand, dict):
             return path or "/"
         for k, gv in golden.items():
+            # RFC 6901 escaping (0.3.10): a key that contains `/` or `~` — an OpenAPI `paths` key is
+            # a URL — must not be able to forge a path separator, or the leaf it names cannot be
+            # addressed by `description_corrections` and the reported path is ambiguous besides. A
+            # key with neither character escapes to itself, so every path this has ever printed for
+            # every other document is unchanged.
+            kp = f"{path}/{ptr_escape(k)}"
             if k not in cand:
-                return f"{path}/{k}"
-            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value, string_diffs,
+                return kp
+            bad = additive_superset(gv, cand[k], kp, null_to_value, string_diffs,
                                      description_corrections, corrections_report)
             if bad is not None:
                 return bad
@@ -333,6 +378,21 @@ _LIST_RUN_RX = re.compile(r"`[^`]*`(?:(?:, or | or |, )`[^`]*`)+")
 # At least two items, same as the backtick rule: `a|b` is a list, a lone `a` is a word.
 _PIPE_ITEM = r"[^\s`|()\[\]{}]+"
 _PIPE_RUN_RX = re.compile(rf"{_PIPE_ITEM}(?:[ \t]*\|[ \t]*{_PIPE_ITEM})+")
+# THE THIRD SPELLING (0.3.10): BACKTICK-QUOTED ITEMS JOINED BY PIPES. This is the one 1.5.5 actually
+# used in the document the openapi cell records — `(expected `groups`|`hooks`|`root`|`plugin_versions`)`
+# in the DELETE overlay route's 400 description, and the spaced form
+# `(`groups` | `hooks` | `root` | `plugin_versions`)` in `OverlayResetView.reset` — and it was read by
+# NEITHER of the first two rules: the backtick rule wants `, `/` or `/`, or ` between its items, and
+# the pipe rule's item is a BARE word (backticks are excluded from `_PIPE_ITEM` so an unparenthesised
+# run cannot swallow the sentence around it). The consequence was that a candidate which only GREW
+# that list, in the golden's own spelling, with nothing else on the line touched, was refused — for
+# the punctuation, not for anything the message stopped saying. THE JUDGE HAS TO READ THE GOLDEN'S
+# SPELLING: 1.5.5's descriptions are verbatim by the owner's rule, so a run the product legitimately
+# wrote is a run this file has to know, or the register is forced to launder real growth with a
+# declaration. Same set relation, same splice proof, same everything-else-byte-identical requirement
+# as the other two; it is its OWN kind, so a list that moved between spellings is still a template
+# change refused by name (see the kind-pairing check in text_list_growth_check).
+_BT_PIPE_RUN_RX = re.compile(r"`[^`]*`(?:[ \t]*\|[ \t]*`[^`]*`)+")
 
 
 # What an accepted row says when the growth proof passed with NOTHING added — the set-superset case
@@ -344,12 +404,17 @@ _REORDER_NOTE = "the declared list was REORDERED, no items added or dropped"
 
 def find_text_lists(text: str) -> list:
     """[(start, end, [item, ...], kind), ...] for every maximal list run in `text` — backtick-quoted
-    (`kind="backtick"`) or pipe-separated (`kind="pipe"`) — in the order they appear.
+    and comma/or-joined (`kind="backtick"`), bare words joined by pipes (`kind="pipe"`), or
+    backtick-quoted items joined by pipes (`kind="backtick-pipe"`, 0.3.10) — in the order they
+    appear.
 
-    Runs never overlap: the two spellings are read independently and a run that starts inside one
-    already taken is dropped (longest wins at an equal start). A backtick-quoted list whose items
-    happen to be joined by pipes is therefore ONE list either way, never two half-read ones."""
+    Runs never overlap: the three spellings are read independently and a run that starts inside one
+    already taken is dropped (longest wins at an equal start). `backtick-pipe` is listed BEFORE
+    `backtick` for exactly that reason: `` `a`|`b`, `c` `` is one backtick-pipe run from `a`, not a
+    bare backtick run starting at `b`, because the longer span that starts earliest wins."""
     spans = []
+    for m in _BT_PIPE_RUN_RX.finditer(text):
+        spans.append((m.start(), m.end(), _LIST_ITEM_RX.findall(m.group(0)), "backtick-pipe"))
     for m in _LIST_RUN_RX.finditer(text):
         spans.append((m.start(), m.end(), _LIST_ITEM_RX.findall(m.group(0)), "backtick"))
     for m in _PIPE_RUN_RX.finditer(text):
@@ -392,7 +457,8 @@ def text_list_growth_check(golden: str, cand: str) -> tuple:
     """(removed, note). `removed` is the list of items present in `cand`'s list but not `golden`'s
     — reported on the accepted row — and is None on failure, where `note` names why.
 
-    The relation: find every list run in each text (backtick-quoted or pipe-separated; same count,
+    The relation: find every list run in each text (backtick-quoted, pipe-separated, or
+    backtick-quoted-and-pipe-joined; same count,
     same order, same spelling, or refused — "growth in two lists" below); every run except AT MOST
     ONE must be byte-identical between the two texts; the ONE run that differs must hold every one
     of golden's items SOMEWHERE in the candidate's — as a SET, not a prefix (0.3.8; see below) — and
