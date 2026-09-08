@@ -4,6 +4,80 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.9
+
+- **`text_list_growth` proves EVERY grown string leaf of a body, not one slot.** One
+  release-note-worthy fact is often written down in several leaves of the SAME document, and through
+  0.3.8 the second one ended the matter: `text_list_growth found more than one differing string
+  leaf: …`, a refusal about the COUNT of leaves that moved rather than about anything any one of them
+  said. busbar's `admin.ops|GetOpenapiJson|ok` is that document — 1.5.5 states the overlay-section
+  enum in THREE prose leaves of the DELETE `/api/v1/admin/overlay/{section}` operation and its view
+  schema (the operation `summary`, its 400 `description`, and `OverlayResetView.reset`'s
+  `description`), and 1.6.0 grows that enum by the four sections it added (`identity-providers`,
+  `export`, `tools`, `agents`). An `additive` entry may now see N differing string leaves; EACH is
+  put through the same 0.3.8 check on its own terms (every golden item found in the candidate's list
+  as a SET, every other list byte-identical, and golden's own raw list text spliced back must
+  reproduce golden byte for byte), the cell is forgiven only when every one of them is growth, and
+  the row names each with its own JSON pointer and its own added items. NOTHING IS LOOSER PER LEAF: a
+  leaf that changed in ANY other way still refuses the cell, and now names ITSELF and its own reason
+  — which is the message a reader can act on — instead of a leaf count that reads the same whether
+  one document grew a fact in three places or a second field was quietly reworded. Every hard failure
+  of the JSON walk (a missing key, a short array, a non-string scalar, a `null` outside
+  `null_to_value`) is untouched and still stops at the first one. THE RUN KIND IS DECIDED PER LEAF,
+  not once per body: the openapi operation's three leaves are not spelled alike (the `summary`'s run
+  is BARE PIPE, `section ∈ groups|hooks|root|plugin_versions`, the others are backtick-quoted), so a
+  generalisation that widened only the count while assuming one spelling per document would pass a
+  single-spelling body and still refuse the one this release is for. Each leaf is read by
+  `find_text_lists` on its own text, and the same-spelling-on-both-sides rule stays a per-leaf rule
+  too — a leaf that RESPELLED its list is still refused, naming that leaf and the two kinds it
+  paired, however honestly its neighbours grew. In the self-test the only verdict
+  that could have moved is `ss6`'s, and it does not: two leaves where one grew and one was reworded
+  is still RED — it now says `not a superset at /hint (… no backtick or pipe list found)` instead of
+  naming both paths and neither reason. That is the single existing case whose MESSAGE changes.
+
+- **An `additive` entry may name a `transform`, and the rewrite is applied BEFORE the growth proof.**
+  Through 0.3.8 this was refused at load — "additive proves growth by inspecting the recorded pair,
+  never by rewriting it first; use one register kind or the other" — and busbar's
+  `boot.refusal|BOOT-P20|validate` (and `|BOOT-P29|`, `|BOOT-P30|`) is the cell that ruling had no
+  answer for. 1.6.0 stamps a diagnostic code onto the refusal line (`[error] BUSBAR-3015: `, which
+  the register's D-1 transform has covered for these families since codes were introduced) AND the
+  limit-metric enum on that SAME line grew by the four token metrics. Neither kind could take it:
+  `transform` is credited for a class only when the REWRITTEN PAIR IS BYTE-IDENTICAL, and it is not,
+  because the list grew; `additive` saw the raw pair, where the prefix is one more thing that moved,
+  and refused it as a template change. Splitting it across two entries cannot express it either —
+  both changes are on the same line, so each entry would have to forgive the other's difference to be
+  credited for its own. The transform is now applied to BOTH sides first (the same symmetric
+  normalization the transform branch already performs) and the growth proof runs on the rewritten
+  pair, on `effects.stderr`, on a plain-text `body`, and per string leaf inside a JSON body. NOTHING
+  IS WEAKENED BY THE ORDER: the transform is still held to `transform_pattern_too_broad()` (it must
+  name a specific token, never a shape wide enough to swallow arbitrary content) and to a declared
+  `cells` scope with an `expected_cells` count; the growth proof is still the whole of what forgives
+  the class; and — the guard that matters — an `additive` entry carrying a transform is NEVER added
+  to the `transforms` list, so the fired-transform path that hands a cell's WHOLE raw class list to
+  the accepted column never runs for it. It claims exactly the classes it proves, and a pair the
+  rewrite happens to reconcile completely is just `text_list_growth_check`'s `golden == cand` case.
+
+- Not changed, and named out loud because it is what still stands between
+  `admin.ops|GetOpenapiJson|ok` and a green proved on growth alone: **there is no third list
+  spelling.** 1.5.5's real 400 line joins BACKTICK-QUOTED items with PIPES —
+  `` (expected `groups`|`hooks`|`root`|`plugin_versions`) `` — and that run is read by neither rule
+  (the backtick rule wants `, ` / ` or ` / `, or ` between items; the pipe rule's item is a bare
+  word, backticks excluded, so an unparenthesised run cannot swallow the sentence around it). A
+  candidate that ONLY grows that list, in the golden's own spelling, with nothing else on the line
+  touched, is still red — for the spelling, not for anything the message stopped saying. This release
+  generalises the leaf COUNT and the transform ORDER and adds no spelling; the self-test pins the
+  case so that closing it either way (busbar spelling that line the way it spells the other two, or a
+  later release learning the backtick-pipe run) shows up as a case moving.
+
+- Not changed, and worth saying because the other obvious workaround for the openapi cell runs into it:
+  `description_corrections` still cannot name a leaf under an OpenAPI `paths` key. `additive_superset`
+  builds a leaf's path by joining keys with `/`, and a `paths` key IS a URL, so the pointer comes out
+  `/paths//api/v1/admin/overlay/{section}/…` and `resolve_json_pointer` splits it back into segments
+  that name nothing. The 0.3.6 load-time guard refuses such an entry rather than letting it sit there
+  covering nothing, which is the right outcome of the two rules meeting; the self-test now pins it,
+  so it is a documented blocker rather than a surprise. It is why the openapi cell has to be made
+  green by GROWTH in each leaf rather than by declaration.
+
 ## 0.3.8
 
 - **`text_list_growth` reads a PIPE-SEPARATED list, and proves growth as a SET rather than a
