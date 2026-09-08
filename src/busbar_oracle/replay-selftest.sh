@@ -1718,5 +1718,51 @@ else
   say FAIL "record.sh's concurrent path does not collect egress, so capture-concurrent.py can only ever record an empty list"
 fi
 
+# (nn) A SCRIPT CELL'S PASS MEANS THE DRIVER SUCCEEDED. It used to mean "a non-empty captured.json
+# exists, its status is not -1, and it carries no harness_error" — the exit status of the process
+# that wrote the file was thrown away at the invocation, and three of busbar's own drivers define no
+# fail() and no harness_error at all, so for those the file test WAS the whole gate. Drives the REAL
+# script_cell_verdict() out of record.sh (extracted by name, so a change to the rule changes this
+# case with it), never a restatement of it.
+eval "$(sed -n '/^script_cell_verdict()/,/^}/p' "${here}/record.sh")"
+nn="$W/nn"; mkdir -p "$nn"
+nn_case() {  # <want> <driver-exit-status> <captured-json> <label>
+  local want="$1" rc="$2" body="$3" label="$4" got
+  printf '%s' "$body" >"$nn/captured.json"
+  got="$(script_cell_verdict "$nn/captured.json" "$rc" | cut -f1)"
+  [ "$got" = "$want" ] && say PASS "script cell: $label -> $want" \
+                       || say FAIL "script cell: $label -> got $got, want $want"
+}
+nn_case PASS 0 '{"status":0,"headers":{},"body":"ok","effects":{}}' \
+  "a driver that exited 0 and wrote a clean capture"
+nn_case FAIL 1 '{"status":0,"headers":{},"body":"ok","effects":{}}' \
+  "a driver that wrote a plausible capture and then EXITED 1 (no harness_error anywhere)"
+nn_case FAIL 2 '{"status":0,"headers":{},"body":"ok","effects":{}}' \
+  "a driver that exited 2 with a status of 0 in its capture"
+nn_case FAIL 0 '{"status":1,"headers":{},"body":"","effects":{"harness_error":"openssl produced no cert"}}' \
+  "a driver that marked a harness_error (still red, whatever it exited)"
+nn_case SKIP 0 '{"status":-1,"headers":{},"body":"","effects":{"error":"no backend in the environment"}}' \
+  "a -1 named gap from a driver that exited 0"
+nn_case FAIL 0 '{"status":-1,"headers":{},"body":"","effects":{"harness_error":"the boot never answered","error":"x"}}' \
+  "a driver that gave up AND marked it on a -1 path is a FAILURE, not a named gap (a SKIP row leaves the owed set and is never compared)"
+: >"$nn/captured.json"
+[ "$(script_cell_verdict "$nn/captured.json" 0 | cut -f1)" = FAIL ] \
+  && say PASS "script cell: an empty captured.json -> FAIL" \
+  || say FAIL "script cell: an empty captured.json was not refused"
+
+# …and the recorder must ASK, which means capturing the status it used to throw away, and must give
+# every selected cell a fresh directory — the stale-file path that made the file test satisfiable by
+# the previous run's output.
+nn_src="$(cat "${here}/record.sh")"
+nn_bad=""
+grep -qE 'bash "\$\{data\}/scripts/\$\{sname\}".*\n?' <<<"$nn_src" >/dev/null
+grep -q 'script_rc=\$?' <<<"$nn_src" || nn_bad="${nn_bad} the driver's exit status is never captured;"
+grep -q 'script_cell_verdict "\$raw/captured.json" "\$script_rc"' <<<"$nn_src" || nn_bad="${nn_bad} the verdict is not asked for that status;"
+grep -q 'raw="\$OUT/raw/\$safe"; rm -rf "\$raw"; mkdir -p "\$raw"' <<<"$nn_src" || nn_bad="${nn_bad} the per-cell raw dir is not emptied before the cell runs;"
+grep -q 'rm -f "\$OUT/cells/\$safe.json"' <<<"$nn_src" || nn_bad="${nn_bad} a previous run's normalized cell survives into this one;"
+[ -z "$nn_bad" ] \
+  && say PASS "record.sh captures the driver's exit status, asks script_cell_verdict for the verdict, and gives every selected cell a fresh raw dir and no stale cell file" \
+  || say FAIL "record.sh's script path:${nn_bad}"
+
 echo
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }

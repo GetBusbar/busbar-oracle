@@ -800,6 +800,49 @@ run_readback() {  # <request-json {path,headers,auth,listener}> <write-response-
   jq -c --arg p "$pth" '{path: $p, status: .status, body: .body}' <<<"$normd"
 }
 
+# ── THE SCRIPT-CELL VERDICT: ONE RULE, ONE ORDER, ONE PLACE ─────────────────────────────────────
+# A script cell's PASS used to mean three things and none of them was "the driver succeeded": the
+# file `captured.json` exists and is non-empty, its `status` is not -1, and it carries no
+# `effects.harness_error`. The exit status of the process that WROTE that file was discarded at the
+# invocation. Three consequences, all of them observed shapes rather than theory:
+#
+#   * A driver that died on a path it had not thought to mark — a helper returning non-zero, an
+#     inline give-up, a `set -e` trip — had its half-finished capture normalized and recorded PASS.
+#     The candidate then failed the same way for the same reason and matched it byte for byte, so
+#     the golden froze the recorder's own failure in as busbar's contract, permanently green.
+#   * Three shipped drivers in busbar's own tree define no `fail()` and contain no `harness_error`
+#     at all, so for those cells the file test WAS the entire gate.
+#   * With nothing clearing the output directory, the file that satisfied the test could be the
+#     PREVIOUS run's. (Fixed at the top of the loop: each selected cell gets a fresh raw dir.)
+#
+# ORDER MATTERS AND IT WAS WRONG. `status == -1` was tested BEFORE `harness_error` and `continue`d,
+# so a driver that gave up and marked it correctly on a -1 path was filed as a NAMED GAP — and a
+# SKIP row takes the cell out of the owed set entirely, so it is never compared and never reaches
+# diverging.txt. A driver that says "I broke" is believed about that first.
+#
+# Defined ABOVE the loop and taking only a file and a status, so replay-selftest.sh drives this
+# exact function rather than a copy of the rule (same discipline as rigs-ledger.sh's folds).
+script_cell_verdict() {  # <captured.json> <driver-exit-status> -> "<PASS|FAIL|SKIP>\t<why>"
+  local cap="${1-}" rc="${2-}" st
+  if [ ! -s "$cap" ]; then
+    printf 'FAIL\tthe driver produced no captured.json\n'; return 0
+  fi
+  if [ "$(jq -r 'has("effects") and (.effects | has("harness_error"))' "$cap" 2>/dev/null)" = true ]; then
+    printf 'FAIL\tthe driver marked a harness_error\n'; return 0
+  fi
+  st="$(jq -r '.status' "$cap" 2>/dev/null)"
+  if [ "$st" = "-1" ]; then
+    printf 'SKIP\tnamed gap (status -1)\n'; return 0
+  fi
+  case "$rc" in
+    ''|*[!0-9]*) printf 'FAIL\tthe driver exit status was not recorded (%s)\n' "${rc:-<none>}"; return 0 ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    printf 'FAIL\tthe driver exited %s\n' "$rc"; return 0
+  fi
+  printf 'PASS\tstatus %s\n' "$st"
+}
+
 # ── concurrent cells: N parallel requests, one recorded outcome ──────────────────────────────────
 # {request: {method,path,headers,body,auth,listener}, concurrent: {n: <N>}, mock_control, fresh,
 #  config_variant}. Busbar's disposition of a burst is inherently a SET, not one transaction, so the
@@ -914,7 +957,20 @@ n=0
 while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture plane cell; do
   [ -z "$FILTER" ] || [[ "$id" =~ $FILTER ]] || continue
   safe="${id//|/__}"
-  raw="$OUT/raw/$safe"; mkdir -p "$raw"
+  # A FRESH DIRECTORY PER CELL, AND THE STALE CELL FILE WITH IT. Nothing removed anything: `mkdir -p
+  # "$OUT/cells" "$OUT/raw"` created, `: >"$LEDGER"` truncated the ledger and that was all. So
+  # re-recording into an existing --out — the documented way to replace a stale cell, and the
+  # natural thing to do with --filter — left every previous run's artifact in place. A driver that
+  # died in its preamble on the second run wrote nothing, `[ -s "$raw/captured.json" ]` passed on
+  # THE PREVIOUS RUN'S FILE, normalize.py re-derived cells/<id>.json from it, and the ledger said
+  # PASS. The differ never inspects the candidate's own ledger status (it derives the owed set from
+  # the GOLDEN), so that stale cell flowed straight into the comparison as though it were fresh, and
+  # a run into a half-populated --out could compare a different binary's leftovers.
+  #
+  # Only for the cells THIS run selected: a --filter run must not delete the cells it was not asked
+  # to re-record. Everything below writes into the tree it just emptied.
+  raw="$OUT/raw/$safe"; rm -rf "$raw"; mkdir -p "$raw"
+  rm -f "$OUT/cells/$safe.json"
   # `keep_lines` (.body_lines): the cell's contract is the ABSENCE of matching lines; the normalizer
   # keeps only those. `keep_spec` (.keep): the contract is the PRESENCE of a specific
   # header/JSON-key/metrics-line value normalize.py would otherwise strip — passed through verbatim.
@@ -970,6 +1026,7 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
     BUSBAR_BIN="$BIN" RAW="$raw" WORK="$WORK" ORACLE_ADMIN_TOKEN="$ORACLE_ADMIN_TOKEN" TMPDIR="$local_tmp" \
       SCRIPT_LISTEN_PORT="$LISTEN_PORT" SCRIPT_ADMIN_PORT="$ADMIN_PORT" SCRIPT_MOCK_PORT="$(script_mock_port)" \
       bash "${data}/scripts/${sname}" "${local_args[@]}" >"$raw/script.log" 2>&1
+    script_rc=$?
     [ -s "$raw/captured.json" ] || { record "$id" FAIL "script ${sname} produced no captured.json" "$(tail -c 300 "$raw/script.log")"; continue; }
     # STRIP THE DIRECTORIES THIS RUN CHOSE, exactly as record_exec_cell does for an exec cell. A
     # script cell quotes busbar's own stdout back into its effects ("plugins dir: <path>", a
@@ -992,18 +1049,27 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
     python3 "${here}/normalize.py" "$raw/captured.json" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
       || { record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; continue; }
     st="$(jq -r .status "$raw/captured.json")"
-    if [ "$st" = "-1" ]; then record "$id" SKIP "UNSUPPORTED: $(jq -r '.effects.error // "script could not run"' "$raw/captured.json")" "named gap"; continue; fi
-    # A SCRIPT THAT GAVE UP IS NOT A CELL. Every status other than -1 was recorded PASS, so each
-    # script's own `fail 1 …` / `fail 2 …` path (openssl produced no cert, a boot never answered, an
-    # admin call came back empty) wrote a captured.json that became the golden — and the candidate,
-    # failing the same way for the same reason, matched it. Those paths now carry
-    # `effects.harness_error`; a cell wearing it is red, and its half-made cell file goes with it so
-    # no cells/<id>.json survives without a PASS row behind it.
-    if [ "$(jq -r 'has("effects") and (.effects | has("harness_error"))' "$raw/captured.json")" = true ]; then
-      rm -f "$OUT/cells/$safe.json"
-      record "$id" FAIL "script ${sname} gave up (status ${st})" "$(jq -r '.effects.harness_error' "$raw/captured.json" | tr '\n' ' ' | cut -c1-200)"
-      continue
-    fi
+    # THE VERDICT IS script_cell_verdict()'s, defined once above the loop so the self-test drives
+    # THIS rule and not a restatement of it. The detail line is still built here, where the log and
+    # the capture are in scope.
+    IFS=$'\t' read -r sc_verdict sc_why <<<"$(script_cell_verdict "$raw/captured.json" "$script_rc")"
+    case "$sc_verdict" in
+      SKIP)
+        record "$id" SKIP "UNSUPPORTED: $(jq -r '.effects.error // "script could not run"' "$raw/captured.json")" "named gap"
+        continue ;;
+      FAIL)
+        # the half-made cell file goes with the failure: a cells/<id>.json with no PASS row behind it
+        # is exactly the silence-read-as-green the ledger exists to refuse.
+        rm -f "$OUT/cells/$safe.json"
+        if [ "$(jq -r 'has("effects") and (.effects | has("harness_error"))' "$raw/captured.json")" = true ]; then
+          record "$id" FAIL "script ${sname} gave up (status ${st})" \
+            "$(jq -r '.effects.harness_error' "$raw/captured.json" | tr '\n' ' ' | cut -c1-200)"
+        else
+          record "$id" FAIL "script ${sname}: ${sc_why}" \
+            "what the driver wrote is not this cell's contract — a capture from a give-up path recorded as the golden is reproduced by every later binary that fails the same way: $(tail -c 200 "$raw/script.log" | tr '\n' ' ')"
+        fi
+        continue ;;
+    esac
     record "$id" PASS "script ${sname}: status ${st}" ""; n=$((n + 1)); continue
   fi
 
