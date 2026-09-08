@@ -4,6 +4,23 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.7
+
+- **`additive` gains `new_route`, for a route that did not exist in 1.5.5 now answering.** Every
+  additive relation so far (superset, `text_list_growth`, `description_corrections`) compares two
+  REAL responses; there is no relation between 1.5.5's not-found stub and whatever a new route
+  answers with now, so none of them apply. An entry may declare `new_route: true`; on a cell where
+  the golden's status is 404 AND the golden body is shaped like 1.5.5's not-found envelope (a JSON
+  object whose only top-level key is `error`, itself carrying a string `message`) AND the
+  candidate's status is not 5xx, the entry may take `status`, `headers` and `body` for that cell
+  wholesale, no relation checked between the two bodies at all — reported on the accepted row as
+  `new route: golden 404 -> candidate <status>`. Any other golden status, or a candidate 5xx,
+  leaves the flag inert and the ordinary additive rules decide exactly as if it were absent.
+  `status` joins the classes `additive` may take, refused at load unless `new_route: true` is set;
+  the money guard gains a narrow exception for `new_route` + `kind: additive` + a changelog line +
+  only `status` among the money classes named — there is no previous behavior to declare `breaking`
+  against, but it is still money and still needs its own changelog line.
+
 ## 0.3.6
 
 - **`additive` gains `description_corrections`, for a named JSON string leaf that may differ
