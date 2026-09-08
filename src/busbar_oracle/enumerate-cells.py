@@ -81,7 +81,17 @@ def load_product_cells(root: Path, data: Path):
         sys.exit(f"busbar-oracle cells: {path} is not importable as a Python module")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[MODULE_NAME] = mod
-    spec.loader.exec_module(mod)
+    # NO __pycache__ IN THE JUDGED TREE. `exec_module` on a path inside the PRODUCT writes
+    # `<data>/cells/__pycache__/` as a side effect of generating the corpus, so the act of asking
+    # what the corpus is dirties the working tree the gate then asserts is clean, and leaves a file
+    # the tool/data segregation walk cannot read as source. The product's shim exports
+    # PYTHONDONTWRITEBYTECODE for the same reason; this makes it true however the engine was invoked.
+    _bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = _bytecode
     missing = [n for n in ("bind", "COMMENT", "DERIVED_FROM", "OUTCOME_ROWS", "BUILDERS", "SHRINK_PROBE")
                if not hasattr(mod, n)]
     if missing:
@@ -100,14 +110,106 @@ def accepted_shrinks(argv) -> set:
     return out
 
 
+def committed_floor(out: Path) -> tuple:
+    """The per-family floor the COMMITTED cells.json declares, or a REASON it cannot be read.
+
+    Returns `(floor, problem)`; exactly one of the two is meaningful. A non-None `problem` is fatal
+    at every call site — never a reason to carry on with an empty floor.
+
+    THIS USED TO SWALLOW `json.JSONDecodeError` AND CONTINUE WITH NO FLOOR AT ALL. That is the worst
+    available answer to a reference file it cannot read. cells.json IS the owed set: a truncated
+    write, a bad merge conflict, a half-finished hand edit made the file unparseable, the floor was
+    skipped entirely, every family was free to shrink to nothing, and `--write` then committed the
+    shrunken corpus AS THE NEW REFERENCE in the same command — after which the next `--check` had
+    nothing to measure against and agreed. The corrupt file was the one thing standing between the
+    generator and the baseline, and its corruption was the trigger for ignoring it.
+    A reference that cannot be read is not a reference that says "anything goes".
+
+    The COUNTS are validated as well, and for the same reason: a `by_family` entry that is not a
+    non-negative integer (a null a hand edit left behind, a string, `true`) used to be skipped
+    family-by-family, so exactly the families whose committed count had been damaged were the
+    families with no floor.
+    """
+    try:
+        text = out.read_text()
+    except OSError as e:
+        return {}, f"{out} exists but could not be read ({e})"
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as e:
+        return {}, (f"{out} is not valid JSON ({e}). It is the committed corpus — the per-family "
+                    f"floor is measured against it — so a corpus generated now cannot be proven not "
+                    f"to have shrunk. Restore the file (git checkout) before regenerating.")
+    if not isinstance(doc, dict):
+        return {}, f"{out} is not a JSON object, so it declares no counts.by_family floor"
+    counts = doc.get("counts")
+    by_family = counts.get("by_family") if isinstance(counts, dict) else None
+    if not isinstance(by_family, dict) or not by_family:
+        return {}, (f"{out} carries no `counts.by_family` object, so there is no committed floor to "
+                    f"hold this generation to")
+    bad = sorted(f for f, v in by_family.items()
+                 if not isinstance(v, int) or isinstance(v, bool) or v < 0)
+    if bad:
+        return {}, (f"{out}'s `counts.by_family` gives no non-negative integer count for "
+                    f"{', '.join(repr(f) for f in bad)}. A family whose committed count cannot be "
+                    f"read has no floor, which is the one family that most needs one.")
+    return by_family, None
+
+
+def unknown_shrinks(accepted: set, floor: dict) -> list:
+    """`--accept-family-shrink` names that no committed family answers to.
+
+    The flag exists to put a reviewed loss in the command line of the commit that makes it. A
+    MISSPELLED one accepted nothing and refused nothing: it read as a signed-off shrink to the human
+    typing it while the family it meant to name went on being floored (or, if the typo happened to
+    be the family that was really shrinking, it did not). Either way the operator was told something
+    untrue about what they had just accepted."""
+    return sorted(a for a in accepted if a not in floor)
+
+
+def floor_verdict(out: Path, generated: dict, argv) -> tuple:
+    """The whole floor decision, as `main` makes it: `(rc, [messages])`, rc 0 meaning "proceed".
+
+    Factored out so the self-test drives THIS function and not a copy of the rule — the reason the
+    corrupt-reference hole survived is that the only thing exercising the floor was a helper the
+    swallowed exception sat above."""
+    if not out.exists():
+        return 0, []
+    floor, problem = committed_floor(out)
+    if problem:
+        return 1, [f"enumerate-cells: refusing to generate against an unreadable reference:",
+                   f"  - {problem}"]
+    accepted = accepted_shrinks(argv)
+    unknown = unknown_shrinks(accepted, floor)
+    if unknown:
+        return 1, ["enumerate-cells: --accept-family-shrink names a family the committed corpus "
+                   "does not have:",
+                   *[f"  - {u!r}" for u in unknown],
+                   f"  Known families: {', '.join(sorted(floor))}"]
+    problems = family_floor_problems(floor, generated, accepted)
+    if problems:
+        return 1, ["enumerate-cells: the generated corpus is SMALLER than the committed one:",
+                   *[f"  - {p}" for p in problems],
+                   "  A missing fixture makes a whole family return [] silently, and cells.json IS",
+                   "  the owed set: recorder, replayer and parity report would all agree, over a",
+                   "  corpus that lost the family. Restore the fixture, or accept the shrink by name:",
+                   "    busbar-oracle cells --write --accept-family-shrink <family>"]
+    return 0, []
+
+
 def family_floor_problems(was: dict, now: dict, accepted: set) -> list:
-    """Every family whose generated cell count fell below the committed one, unless accepted."""
+    """Every family whose generated cell count fell below the committed one, unless accepted.
+
+    `was` has already been validated by committed_floor(): a count that is not a non-negative
+    integer is refused there rather than skipped here, because skipping it dropped the floor for
+    precisely the family whose committed number was damaged."""
     problems = []
     for fam in sorted(was):
         if fam in accepted:
             continue
         want = was[fam]
-        if not isinstance(want, int):
+        if not isinstance(want, int) or isinstance(want, bool) or want < 0:
+            problems.append(f"family {fam!r}: the committed count {want!r} is not a cell count")
             continue
         got = now.get(fam, 0)
         if got < want:
@@ -166,6 +268,55 @@ def selftest(mod, out: Path) -> int:
 
     say(not family_floor_problems(was, shrunk, fams),
         "--accept-family-shrink names the loss and lets it through, one family at a time")
+
+    # ── THE REFERENCE ITSELF ────────────────────────────────────────────────────────────────────
+    # Every case above measures a generation against a floor that was read successfully. These
+    # measure what happens when the floor CANNOT be read, which was the hole: the decode error was
+    # swallowed, the floor was skipped, and `--write` committed whatever the generator produced.
+    # They drive floor_verdict() — the function main() calls — against real files in a temp dir, so
+    # the case is a test of the shipped decision and not of a restatement of it.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="enumerate-cells-selftest.") as td:
+        tdp = Path(td)
+        full = {"counts": {"by_family": dict(was)}, "cells": []}
+        # the same generation that passed above, but against a reference that will not parse
+        corrupt = tdp / "corrupt.json"
+        corrupt.write_text(json.dumps(full)[:-3])
+        rc, msgs = floor_verdict(corrupt, dict(was), [])
+        say(rc != 0 and any("not valid JSON" in m for m in msgs),
+            "a CORRUPT cells.json is refused, not silently treated as 'no floor'")
+        # and the shrink it was hiding: with the reference unreadable, the loss below used to pass
+        rc_shrunk, _ = floor_verdict(corrupt, {f: 0 for f in was}, [])
+        say(rc_shrunk != 0,
+            "a corpus that lost EVERY family is still refused when the reference is corrupt "
+            "(the corrupt reference cannot launder the loss)")
+
+        # a committed count that is not a cell count leaves that family with no floor
+        damaged = tdp / "damaged.json"
+        one = sorted(was)[0]
+        by_fam = dict(was); by_fam[one] = None
+        damaged.write_text(json.dumps({"counts": {"by_family": by_fam}, "cells": []}))
+        rc, msgs = floor_verdict(damaged, dict(was), [])
+        say(rc != 0 and any(repr(one) in m for m in msgs),
+            f"a committed count that is not a number is refused by name ({one!r}), never skipped")
+
+        # a floor with no counts at all is a floor that proves nothing
+        empty = tdp / "empty-counts.json"
+        empty.write_text(json.dumps({"cells": []}))
+        rc, _ = floor_verdict(empty, dict(was), [])
+        say(rc != 0, "a cells.json with no counts.by_family is refused as a reference")
+
+        good = tdp / "good.json"
+        good.write_text(json.dumps(full))
+        rc, _ = floor_verdict(good, dict(was), [])
+        say(rc == 0, "a readable reference and an unchanged corpus still proceed")
+
+        # --accept-family-shrink is a claim about a family that exists
+        rc, msgs = floor_verdict(good, {f: 0 for f in was}, ["--accept-family-shrink", one + "-typo"])
+        say(rc != 0 and any("does not have" in m for m in msgs),
+            "--accept-family-shrink naming a family the corpus does not have is refused")
+        rc, _ = floor_verdict(good, {**{f: was[f] for f in was}, one: 0}, ["--accept-family-shrink", one])
+        say(rc == 0, "--accept-family-shrink naming a REAL family still accepts its loss")
 
     if bad:
         print(f"\nSELFTEST FAILED: {bad} check(s) did not hold")
@@ -226,27 +377,11 @@ def main() -> int:
     # otherwise launder the loss into the baseline the next `--check` measures against. A real,
     # reviewed shrink is `--accept-family-shrink <family>`, once per family, which puts the loss in
     # the command line of the commit that makes it.
-    floor_problems = []
-    if out.exists():
-        try:
-            committed = json.loads(out.read_text())
-        except json.JSONDecodeError:
-            committed = None
-        if committed is not None:
-            floor_problems = family_floor_problems(
-                (committed.get("counts") or {}).get("by_family") or {},
-                doc["counts"]["by_family"],
-                accepted_shrinks(sys.argv),
-            )
-    if floor_problems:
-        sys.stderr.write("enumerate-cells: the generated corpus is SMALLER than the committed one:\n")
-        for p in floor_problems:
-            sys.stderr.write(f"  - {p}\n")
-        sys.stderr.write("  A missing fixture makes a whole family return [] silently, and cells.json IS\n")
-        sys.stderr.write("  the owed set: recorder, replayer and parity report would all agree, over a\n")
-        sys.stderr.write("  corpus that lost the family. Restore the fixture, or accept the shrink by name:\n")
-        sys.stderr.write("    busbar-oracle cells --write --accept-family-shrink <family>\n")
-        return 1
+    floor_rc, floor_msgs = floor_verdict(out, doc["counts"]["by_family"], sys.argv)
+    for m in floor_msgs:
+        sys.stderr.write(m + "\n")
+    if floor_rc != 0:
+        return floor_rc
     # --check: regenerate to MEMORY and compare against the checked-in cells.json. cells.json is the
     # oracle's owed set — the recorder and the replayer both iterate it — so a tree whose generator
     # and whose committed cell list disagree is a gate measuring a cell set nobody reviewed. A hand
@@ -278,7 +413,17 @@ def main() -> int:
     if "--summary" in sys.argv or "--write" not in sys.argv:
         print(json.dumps(doc["counts"], indent=2))
     if "--write" in sys.argv:
-        out.write_text(rendered)
+        # ATOMIC, because the file being written IS the reference the next run's floor is measured
+        # against. `out.write_text` truncates first: a write interrupted (^C, a full disk, an OOM)
+        # left a TRUNCATED cells.json behind — unparseable, or worse, parseable with fewer cells —
+        # and the corpus the whole gate owes is then whatever survived the interruption.
+        tmp = out.with_name(out.name + ".tmp")
+        try:
+            tmp.write_text(rendered)
+            os.replace(tmp, out)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
         print(f"wrote {rel} ({len(cells)} cells)")
     return 0
 
