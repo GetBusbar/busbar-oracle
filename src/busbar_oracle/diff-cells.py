@@ -174,7 +174,34 @@ def body_as_json(body) -> tuple:
     return None, False
 
 
-def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs: list | None = None) -> str | None:
+def resolve_json_pointer(doc, pointer: str) -> tuple:
+    """(found, value) for a `/a/b/0`-style JSON pointer against `doc`, in the SAME path convention
+    `additive_superset` builds (`""`/`"/"` is the root; a list index is its decimal string). Used to
+    validate a `description_corrections` entry AT LOAD, against the golden's own recorded body —
+    the register may only name a path that actually IS a string somewhere real, never a hypothetical
+    one a typo could silently mean nothing."""
+    if pointer in ("", "/"):
+        return True, doc
+    cur = doc
+    for part in pointer.lstrip("/").split("/"):
+        if isinstance(cur, dict):
+            if part not in cur:
+                return False, None
+            cur = cur[part]
+        elif isinstance(cur, list):
+            if not part.lstrip("-").isdigit():
+                return False, None
+            i = int(part)
+            if i < 0 or i >= len(cur):
+                return False, None
+            cur = cur[i]
+        else:
+            return False, None
+    return True, cur
+
+
+def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs: list | None = None,
+                       description_corrections: set | None = None, corrections_report: list | None = None) -> str | None:
     """The first JSON-pointer path where `cand` is NOT a superset of `golden`, or None if it is one
     everywhere. The relation, applied recursively:
 
@@ -200,7 +227,14 @@ def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs:
     a real divergence — two strings that changed is not "one list grew", whatever either one says
     on its own. Every other mismatch (a missing key, a short array, a non-string scalar, a `null`
     not covered by `null_to_value`) is unaffected and fails immediately, exactly as before: this
-    parameter only ever WIDENS what continues walking, never what ultimately passes."""
+    parameter only ever WIDENS what continues walking, never what ultimately passes.
+
+    `description_corrections`, when it names `path`, forgives a STRING leaf's mismatch OUTRIGHT —
+    no growth proof, no relation to check, just a registered claim that 1.5.5's prose was wrong and
+    this is the correction. Checked BEFORE `string_diffs`, so a corrected leaf never competes for
+    the one slot `text_list_growth` allows: an entry may correct a description AND separately prove
+    growth on a different leaf in the same body. `corrections_report`, when passed a list, records
+    `(path, golden_str, cand_str)` for every leaf forgiven this way, for the accepted row to name."""
     if golden is None and cand is not None:
         return None if path in null_to_value else (path or "/")
     if isinstance(golden, dict):
@@ -209,7 +243,8 @@ def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs:
         for k, gv in golden.items():
             if k not in cand:
                 return f"{path}/{k}"
-            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value, string_diffs)
+            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value, string_diffs,
+                                     description_corrections, corrections_report)
             if bad is not None:
                 return bad
         return None
@@ -217,15 +252,21 @@ def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs:
         if not isinstance(cand, list) or len(cand) < len(golden):
             return path or "/"
         for i, gv in enumerate(golden):
-            bad = additive_superset(gv, cand[i], f"{path}/{i}", null_to_value, string_diffs)
+            bad = additive_superset(gv, cand[i], f"{path}/{i}", null_to_value, string_diffs,
+                                     description_corrections, corrections_report)
             if bad is not None:
                 return bad
         return None
     if golden != cand:
-        if string_diffs is not None and isinstance(golden, str) and isinstance(cand, str):
-            string_diffs.append((path or "/", golden, cand))
+        p = path or "/"
+        if description_corrections and p in description_corrections and isinstance(golden, str) and isinstance(cand, str):
+            if corrections_report is not None:
+                corrections_report.append((p, golden, cand))
             return None
-        return path or "/"
+        if string_diffs is not None and isinstance(golden, str) and isinstance(cand, str):
+            string_diffs.append((p, golden, cand))
+            return None
+        return p
     return None
 
 
@@ -732,10 +773,11 @@ def first_diff_text(classes, detail) -> str:
         parts = []
         for entry in detail["additive.removed"]:
             items = entry.get("removed") or []
-            if not items:
-                continue
-            where = f" at {entry['path']}" if entry.get("path") else ""
-            parts.append(f"added {', '.join(dict.fromkeys(items))}{where}")
+            if items:
+                where = f" at {entry['path']}" if entry.get("path") else ""
+                parts.append(f"added {', '.join(dict.fromkeys(items))}{where}")
+            for corr_path, gtext, ctext in entry.get("corrections") or []:
+                parts.append(f"corrected {corr_path}: {gtext!r} -> {ctext!r}")
         return ("additive: " + "; ".join(parts)) if parts else "additive: superset (no new items)"
     if k in ADDITIVE_CLASSES and detail.get("additive.rejected"):
         return detail["additive.rejected"]
@@ -898,6 +940,42 @@ def main() -> int:
                     sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and names "
                              f"'effects.stderr', which has no JSON-superset relation. Set "
                              f"`text_list_growth: true` to use the backtick-list-growth proof instead.")
+                # `description_corrections` NAMES A REAL STRING, NEVER A HYPOTHETICAL ONE. A pointer
+                # that does not resolve to a string leaf in ANY golden cell this entry matches is
+                # refused here — a typo'd path would otherwise silently forgive nothing (the leaf it
+                # meant to correct stays uncovered and the cell stays red for an unrelated reason,
+                # which is a confusing way to fail) or, worse, later resolve against a DIFFERENT
+                # field a future recording happens to add at that path. Checked against every
+                # matching cell that actually has a golden recording; a cell this entry's `cells`
+                # regex matches but the golden never recorded is not evidence either way.
+                dc = e.get("description_corrections") or []
+                if dc:
+                    if not isinstance(dc, list) or not all(isinstance(p, str) for p in dc):
+                        sys.exit(f"accepted-differences: entry {base['id']!r}'s description_corrections "
+                                 f"must be a list of JSON-pointer strings")
+                    matched = [cid for cid in all_cell_ids if base["rx"].search(cid)]
+                    for ptr in dc:
+                        checked_any, is_string = False, False
+                        for cid in matched:
+                            gp = os.path.join(a.golden, "cells", safe_name(cid) + ".json")
+                            if not os.path.exists(gp):
+                                continue
+                            try:
+                                gcell = json.load(open(gp, encoding="utf-8"))
+                            except Exception:
+                                continue
+                            gj, gok = body_as_json(gcell.get("body"))
+                            if not gok:
+                                continue
+                            checked_any = True
+                            found, val = resolve_json_pointer(gj, ptr)
+                            if found and isinstance(val, str):
+                                is_string = True
+                                break
+                        if checked_any and not is_string:
+                            sys.exit(f"accepted-differences: entry {base['id']!r}'s description_corrections "
+                                     f"names {ptr!r}, which is not a string leaf in the golden body of any "
+                                     f"matching cell.")
             if "cells" not in e and not base["classes"] and "transform" not in e:
                 sys.exit(f"accepted-differences: entry {base['id']!r} has neither cells nor classes (a total blanket)")
             # A TRANSFORM IS NOT EXEMPT FROM HAVING A SCOPE. `cells` defaulted to "." for every entry,
@@ -968,6 +1046,7 @@ def main() -> int:
                 # cover a value that was never populated instead of one that is provably unchanged.
                 base["null_to_value"] = set(e.get("null_to_value", []))
                 base["text_list_growth"] = bool(e.get("text_list_growth", False))
+                base["description_corrections"] = set(e.get("description_corrections", []) or [])
                 additive.append(base)
             else:
                 accepted.append(base)
@@ -1198,24 +1277,25 @@ def main() -> int:
                             if not (gok and cok):
                                 additive_note = ("additive: body is not JSON on both sides" if not e["text_list_growth"]
                                                  else "additive: body has no text or JSON on both sides for text_list_growth")
-                            elif e["text_list_growth"]:
-                                # `text_list_growth` reaches INSIDE an otherwise-superset JSON body:
-                                # a STRING leaf mismatch is deferred (string_diffs) rather than
-                                # failing the walk immediately, so an error-message field that grew
-                                # its own backtick list can still pass — but only when it is the
-                                # ONLY leaf that differs. Two differing leaves is not "one list
-                                # grew" under either leaf's own story, whatever either one says on
-                                # its own, so BOTH are named and the cell stays red.
-                                string_diffs = []
-                                bad = additive_superset(gj, cj, "", e["null_to_value"], string_diffs)
+                            else:
+                                # `string_diffs` (only under `text_list_growth`) defers a STRING
+                                # leaf mismatch instead of failing on it immediately, so an
+                                # error-message field that grew its own backtick list can still pass
+                                # — but only when it is the ONLY leaf that differs; two differing
+                                # leaves is not "one list grew" under either leaf's own story.
+                                # `description_corrections` forgives a NAMED leaf's mismatch
+                                # outright (checked first inside additive_superset, so a corrected
+                                # leaf never competes for text_list_growth's one slot).
+                                string_diffs = [] if e["text_list_growth"] else None
+                                corrections_report = []
+                                bad = additive_superset(gj, cj, "", e["null_to_value"], string_diffs,
+                                                        e["description_corrections"], corrections_report)
                                 if bad is not None:
                                     additive_note = f"additive: not a superset at {bad}"
-                                elif len(string_diffs) > 1:
+                                elif string_diffs and len(string_diffs) > 1:
                                     paths = ", ".join(p for p, _, _ in string_diffs)
                                     additive_note = f"additive: text_list_growth found more than one differing string leaf: {paths}"
-                                elif not string_diffs:
-                                    claimed.add("body"); body_ok = True
-                                else:
+                                elif string_diffs:
                                     leaf_path, gstr, cstr = string_diffs[0]
                                     removed, note = text_list_growth_check(gstr, cstr)
                                     if removed is not None:
@@ -1223,14 +1303,16 @@ def main() -> int:
                                         if removed:
                                             additive_removed.append({"entry": e["id"], "class": "body",
                                                                      "path": leaf_path, "removed": removed})
+                                        if corrections_report:
+                                            additive_removed.append({"entry": e["id"], "class": "body",
+                                                                     "corrections": corrections_report})
                                     else:
                                         additive_note = f"additive: not a superset at {leaf_path} ({_sans_additive_prefix(note)})"
-                            else:
-                                bad = additive_superset(gj, cj, "", e["null_to_value"])
-                                if bad is None:
-                                    claimed.add("body"); body_ok = True
                                 else:
-                                    additive_note = f"additive: not a superset at {bad}"
+                                    claimed.add("body"); body_ok = True
+                                    if corrections_report:
+                                        additive_removed.append({"entry": e["id"], "class": "body",
+                                                                 "corrections": corrections_report})
                     if "headers" in want:
                         bad = additive_headers_superset(g.get("headers", {}), cc.get("headers", {}), body_ok)
                         if bad is None:
