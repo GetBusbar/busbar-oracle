@@ -922,9 +922,9 @@ VV_400_G='`invalid_request`: unknown overlay section (expected `groups`, `hooks`
 VV_400_C='`invalid_request`: unknown overlay section (expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed'
 VV_RESET_G='The section that was reset (`groups`, `hooks`, `root`, or `plugin_versions`).'
 VV_RESET_C='The section that was reset (`groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`).'
-VV_P_SUMMARY='/paths//api/v1/admin/overlay/{section}/delete/summary'
-VV_P_400='/paths//api/v1/admin/overlay/{section}/delete/responses/400/description'
-VV_P_409='/paths//api/v1/admin/overlay/{section}/delete/responses/409/description'
+VV_P_SUMMARY='/paths/~1api~1v1~1admin~1overlay~1{section}/delete/summary'
+VV_P_400='/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/400/description'
+VV_P_409='/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/409/description'
 VV_P_RESET='/components/schemas/OverlayResetView/properties/reset/description'
 cat >"$W/vv-accept.json" <<'JSON'
 {"accepted":[{"id":"F-011c overlay sections grow in every leaf that names them","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body"],"changelog":"selftest: the overlay section enum gains identity-providers, export, tools, agents","rationale":"selftest: N grown leaves, each proved as a set","text_list_growth":true}]}
@@ -1021,17 +1021,17 @@ status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
   && say PASS "the real GetOpenapiJson pair names every leaf that is NOT growth, and does not name the one that is" \
   || say FAIL "VV-4 real openapi pair was not red-naming-each-leaf: rc=$rc status=$status_col diff='$diff_col'"
 
-# (vv7) THE THIRD SPELLING, PINNED AS THE BLOCKER IT IS. 1.5.5's real 400 line joins BACKTICK-QUOTED
-# items with PIPES — `` (expected `groups`|`hooks`|`root`|`plugin_versions`) `` — and that is a run
-# NEITHER rule reads: the backtick rule wants `, ` / ` or ` / `, or ` between items, and the pipe
-# rule's item is a bare word (backticks are excluded from it, so an unparenthesised run cannot
-# swallow the sentence around it). So even a candidate that ONLY GROWS that list, in the golden's own
-# spelling, with nothing else on the line touched and the other two leaves growing honestly, is RED —
-# and red for the SPELLING, not for anything the message stopped saying. This release generalises the
-# leaf COUNT and the transform ORDER and deliberately adds no third spelling, so this is the one
-# remaining thing between `admin.ops|GetOpenapiJson|ok` and a green proved on growth alone. Pinned
-# here so that whichever way it is closed — busbar spelling that line the way it spells the other
-# two, or a later release learning the backtick-pipe run — the change shows up as this case moving.
+# (vv7) THE THIRD SPELLING, READ (0.3.10). 1.5.5's real 400 line joins BACKTICK-QUOTED items with
+# PIPES — `` (expected `groups`|`hooks`|`root`|`plugin_versions`) `` — and through 0.3.9 that run was
+# read by NEITHER rule: the backtick rule wants `, ` / ` or ` / `, or ` between its items, and the
+# pipe rule's item is a bare word (backticks excluded, so an unparenthesised run cannot swallow the
+# sentence around it). A candidate that ONLY GREW that list, in the golden's own spelling, with
+# nothing else on the line touched, was red — for the punctuation, not for anything the message
+# stopped saying. THE JUDGE HAS TO READ THE GOLDEN'S SPELLING: 1.5.5's descriptions are verbatim by
+# the owner's rule, so a run the product legitimately wrote is a run this file has to know, or the
+# register is forced to launder real growth with a declaration. Here the 400 leaf grows in its own
+# backtick-pipe spelling and the summary grows in its bare-pipe one: BOTH are proved, in one cell,
+# in two different spellings.
 rm -rf "$W/vv7-cand" "$W/out-vv7"
 cp -R "$FIX" "$W/vv7-cand"
 vv_doc "$W/vv7-cand/cells/self__a__ok.json" "$VV_SUMMARY_C" \
@@ -1041,35 +1041,86 @@ bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv7-cand" --ou
   --allow-harness-skew --no-check-golden --accepted "$W/vv-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv7.log" 2>&1
 rc=$?
 row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv7/ledger.tsv")"
-status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
-[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$VV_P_400"* ]] && [[ "$diff_col" == *"no backtick or pipe list found"* ]] \
-  && [[ "$diff_col" != *"$VV_P_SUMMARY"* ]] \
-  && say PASS "the real 400 line's backtick-PIPE spelling is read by neither rule, so even PURE growth in it is red -- naming that leaf alone" \
-  || say FAIL "VV-7 backtick-pipe spelling was not red-with-that-reason: rc=$rc status=$status_col diff='$diff_col'"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] \
+  && [[ "$diff_col" == *"added identity-providers, export, tools, agents at $VV_P_400"* ]] \
+  && [[ "$diff_col" == *"added identity-providers, export, tools, agents at $VV_P_SUMMARY"* ]] \
+  && say PASS "the real 400 line's backtick-PIPE spelling is READ, and grows beside a bare-pipe leaf in the same cell" \
+  || say FAIL "VV-7 backtick-pipe growth was not accepted: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
 
-# (vv5) …AND THE ESCAPE HATCH IS CLOSED FOR THIS DOCUMENT, WHICH THE TOOL SAYS AT LOAD RATHER THAN
-# BY FORGIVING NOTHING. The obvious way to make (vv4) green without changing busbar is to declare the
-# three rewritten leaves as `description_corrections`. That cannot be written today, and NOT for a
-# reason about policy: `additive_superset` builds a leaf's path by joining keys with `/`, so an
-# OpenAPI `paths` key — which IS a URL and contains slashes — yields
-# `/paths//api/v1/admin/overlay/{section}/…`, and `resolve_json_pointer` splits that back on `/` into
-# segments that no longer name anything. The pointer resolves nowhere, and the load-time guard
-# introduced in 0.3.6 (a correction may only name a path that IS a string in some golden) refuses the
-# ENTRY rather than letting it sit there covering nothing. That refusal is the correct outcome of the
-# two rules meeting and it is pinned here so it stays visible: it is exactly why F-011c cannot buy
-# `admin.ops|GetOpenapiJson|ok` with declarations, and why the leaves have to GROW (case vv1) for
-# that cell to be green on the tool's own proof.
+# (vv7b) …AND THE SET RULE HOLDS IN THE NEW KIND. The same backtick-pipe line, grown but also DROPPING
+# a golden item, is refused naming the item and its position in the GOLDEN's list. A new spelling is a
+# new way to WRITE a list, never a new relation.
+rm -rf "$W/vv7b-cand" "$W/out-vv7b"
+cp -R "$FIX" "$W/vv7b-cand"
+vv_doc "$W/vv7b-cand/cells/self__a__ok.json" "$VV_SUMMARY_C" \
+  '`invalid_request`: unknown overlay section (expected `groups`|`root`|`plugin_versions`|`identity-providers`|`export`|`tools`|`agents`), malformed `If-Match` header, ephemeral busbar: no disk config to read, merge onto, or revert to, invalid config; nothing changed' \
+  "$VV4_RESET_G" "$VV4_409_G"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv7b-cand" --out "$W/out-vv7b" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv7b.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv7b/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] \
+  && [[ "$diff_col" == *"$VV_P_400 (not a superset at list item 1 ('hooks' is in the golden's list and not in the candidate's))"* ]] \
+  && say PASS "a dropped item inside a backtick-PIPE list is refused, naming the item" \
+  || say FAIL "VV-7b backtick-pipe drop was not red-with-reason: rc=$rc status=$status_col diff='$diff_col'"
+
+# (vv7c) …AND RESPELLING IS STILL A TEMPLATE CHANGE. This is what 1.6.0 actually did to that line —
+# `` `a`|`b` `` became "expected one of `a`, `b`" — and reading the golden's spelling must not make
+# the candidate free to choose a different one. Red, naming the two kinds it paired.
+rm -rf "$W/vv7c-cand" "$W/out-vv7c"
+cp -R "$FIX" "$W/vv7c-cand"
+vv_doc "$W/vv7c-cand/cells/self__a__ok.json" "$VV_SUMMARY_C" "$VV4_400_C" "$VV4_RESET_G" "$VV4_409_G"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv7c-cand" --out "$W/out-vv7c" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv7c.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv7c/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$VV_P_400"* ]] && [[ "$diff_col" == *"paired a backtick-pipe list with a backtick list"* ]] \
+  && say PASS "a backtick-PIPE list respelled as a backtick-comma list is still a template change, named as such" \
+  || say FAIL "VV-7c backtick-pipe respelling was not red-with-reason: rc=$rc status=$status_col diff='$diff_col'"
+
+# (vv5) A REGISTERED FACTUAL CORRECTION CAN NAME A LEAF UNDER AN OPENAPI `paths` KEY (0.3.10). Through
+# 0.3.9 it could not, and NOT for a reason about policy: `additive_superset` built a leaf's path by
+# joining keys with `/`, so a `paths` key — which IS a URL — came out as
+# `/paths//api/v1/admin/overlay/{section}/…`, and `resolve_json_pointer` split that back into
+# segments (`paths`, ``, `api`, …) that named nothing. The pointer resolved nowhere and the 0.3.6
+# guard refused the ENTRY — the polite failure, but it meant the register could not address a single
+# leaf of the largest document busbar records. Paths are now BUILT with RFC 6901 escaping and
+# RESOLVED unescaped, so the two halves agree on the standard rather than on a convention. Here the
+# three leaves 1.6.0 genuinely REWROTE are declared, the one that GREW is proved, and the row says
+# which is which: a correction is named with both texts, growth with its items.
 cat >"$W/vv5-accept.json" <<JSON
-{"accepted":[{"id":"F-011c overlay sections (rewrites declared)","kind":"additive","by":"selftest","cells":"^self\\\\|a\\\\|ok\$","expected_cells":1,"classes":["body"],"changelog":"selftest: the overlay section enum gains identity-providers, export, tools, agents","rationale":"selftest: declaring the rewritten leaves instead of proving them","text_list_growth":true,"description_corrections":["$VV_P_400","$VV_P_409","$VV_P_RESET"]}]}
+{"accepted":[{"id":"F-011c overlay sections (growth proved, rewrites declared)","kind":"additive","by":"selftest","cells":"^self\\\\|a\\\\|ok\$","expected_cells":1,"classes":["body"],"changelog":"selftest: the overlay section enum gains identity-providers, export, tools, agents","rationale":"selftest: one grown leaf proved, three rewritten leaves declared","text_list_growth":true,"description_corrections":["$VV_P_400","$VV_P_409","$VV_P_RESET"]}]}
 JSON
 rm -rf "$W/out-vv5"
 bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv4-cand" --out "$W/out-vv5" --cells "$W/vv-cells.json" \
   --allow-harness-skew --no-check-golden --accepted "$W/vv5-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv5.log" 2>&1
 rc=$?
-grep -q "not a string leaf" "$W/out-vv5.log" && msg_ok=1 || msg_ok=0
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-vv5/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] \
+  && [[ "$diff_col" == *"added identity-providers, export, tools, agents at $VV_P_SUMMARY"* ]] \
+  && [[ "$diff_col" == *"corrected $VV_P_400"* ]] && [[ "$diff_col" == *"corrected $VV_P_409"* ]] && [[ "$diff_col" == *"corrected $VV_P_RESET"* ]] \
+  && say PASS "a description_corrections pointer under an OpenAPI 'paths' key RESOLVES, so the real pair goes green with the rewrites declared and the growth proved" \
+  || say FAIL "VV-5 slash-bearing correction pointer did not resolve: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
+
+# (vv5b) …AND A POINTER THAT STILL RESOLVES NOWHERE IS STILL REFUSED AT LOAD. The escaping widens what
+# can be ADDRESSED, never what may be missing: a correctly-escaped `paths` pointer naming a response
+# code the golden never had is the same typo it always was, and it stops the run rather than sitting
+# in the register covering nothing.
+cat >"$W/vv5b-accept.json" <<JSON
+{"accepted":[{"id":"VV-5b pointer that names nothing","kind":"additive","by":"selftest","cells":"^self\\\\|a\\\\|ok\$","expected_cells":1,"classes":["body"],"changelog":"x","rationale":"y","text_list_growth":true,"description_corrections":["/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/499/description"]}]}
+JSON
+rm -rf "$W/out-vv5b"
+bash "${here}/replay.sh" --golden "$W/vv4-golden" --candidate "$W/vv4-cand" --out "$W/out-vv5b" --cells "$W/vv-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/vv5b-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-vv5b.log" 2>&1
+rc=$?
+grep -q "not a string leaf" "$W/out-vv5b.log" && msg_ok=1 || msg_ok=0
 [ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
-  && say PASS "a description_corrections pointer under an OpenAPI 'paths' key resolves nowhere and is refused AT LOAD, never silently covering nothing" \
-  || say FAIL "VV-5 slash-bearing correction pointer was not refused at load: rc=$rc msg_ok=$msg_ok (see $W/out-vv5.log)"
+  && say PASS "an escaped pointer that still resolves nowhere is refused at load, exactly as before" \
+  || say FAIL "VV-5b unresolvable escaped pointer was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-vv5b.log)"
 
 # (tt) `description_corrections` — A NAMED LEAF MAY DIFFER OUTRIGHT, NO GROWTH PROOF NEEDED, BECAUSE
 # THE REGISTER SAYS SO EXPLICITLY. Unlike `text_list_growth` (which proves growth mechanically),
