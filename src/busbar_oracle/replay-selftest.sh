@@ -315,6 +315,62 @@ status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
   && say PASS "accepted transform + content-length -> class list is 'body' alone (no phantom headers)" \
   || say FAIL "transform content-length rc=$rc status=$status_col title=$title_col (expected the class list to end ': body')"
 
+# (n1) A TRANSFORM MUST APPLY SYMMETRICALLY, NOT JUST TO THE CANDIDATE. A `transform` entry rewrites
+# the candidate on the built-in assumption that the pattern it strips exists ONLY on the candidate
+# side (the real case: a diagnostic code or a new series that 1.5.5 never emitted). That assumption
+# breaks the moment the golden is ALSO shaped like the candidate — e.g. two recordings of the same
+# 1.6.0 binary, or literally a self-diff — and stripping the pattern from the candidate alone then
+# manufactures a divergence out of an already-identical pair. Here the pattern is present on BOTH
+# sides identically before any transform runs, so the pair is byte-identical; the transform firing
+# must not turn that into a FAIL. Before the fix this reported FAIL/body (the candidate lost the
+# token, the golden kept it); after the fix it must report 0 diverging rows.
+cp -R "$FIX" "$W/sym-g"; cp -R "$FIX" "$W/sym-c"
+python3 - "$W/sym-g/cells/self__b__stream.json" "$W/sym-c/cells/self__b__stream.json" <<'EOF'
+import json, sys
+for p in sys.argv[1:]:
+    d = json.load(open(p))
+    d["body"]["text"] = d["body"]["text"].replace("hi", "hi TOKEN123")
+    json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$W/sym-g" --candidate "$W/sym-c" --out "$W/out-n1" --cells "$CELLS" \
+  --allow-harness-skew --no-check-golden --accepted "$W/xform-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-n1.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-n1/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [ "$(fails_in "$W/out-n1")" = 0 ] \
+  && say PASS "a transform-bearing register applied to a candidate that is ALSO 1.6.0-shaped (self-diff / A-vs-B) -> 0 diverging, not a phantom body FAIL" \
+  || say FAIL "symmetric-transform self-diff rc=$rc status=$status_col fails=$(fails_in "$W/out-n1") row='$row' (see $W/out-n1.log)"
+
+# (n2) …and the REAL asymmetric case — a golden line that never carried the pattern, a candidate
+# that does — is still forgiven exactly as before: applying the transform to a golden copy that
+# lacks the pattern is a no-op on that side, so the fix changes nothing about the intended use.
+# This is the same fixture and register as case (i); re-asserted here, side by side with (n1) and
+# (n3), so the three properties this fix must hold are proven together rather than scattered.
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-i/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$status_col" = PASS ] && [[ "$title_col" == ACCEPTED* ]] \
+  && say PASS "the real asymmetric case (golden without the pattern, candidate with it) is still forgiven, unchanged by the symmetry fix" \
+  || say FAIL "asymmetric transform case regressed: status=$status_col title=$title_col"
+
+# (n3) A TRANSFORM MUST NEVER LAUNDER A GENUINE DIVERGENCE. The candidate here carries the token
+# AND an unrelated body corruption the transform's regex does not touch; stripping the token
+# symmetrically must still leave the real difference visible, on both sides of the fix.
+cp -R "$FIX" "$W/lie-c"
+python3 - "$W/lie-c/cells/self__b__stream.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["text"] = d["body"]["text"].replace("hi", "hi TOKEN123").replace("[DONE]", "[WRONG]")
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/lie-c" --out "$W/out-n3" --cells "$CELLS" \
+  --allow-harness-skew --no-check-golden --accepted "$W/xform-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-n3.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-n3/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" == *"body"* ]] \
+  && say PASS "a transform never turns a genuine divergence into a pass -> still RED [body] under an otherwise-forgiving entry" \
+  || say FAIL "a planted body diff under a transform-bearing entry was NOT red: rc=$rc status=$status_col title=$title_col"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
