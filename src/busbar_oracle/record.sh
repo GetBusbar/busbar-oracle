@@ -979,9 +979,19 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
   # it names the variable that carries the fixture (a backend connection URL), and the cell is a
   # named gap only while that variable is unset. Both arms record the SAME row text, so a gap that
   # later becomes recordable does not churn the ledger of the gaps beside it.
-  if oracle_fixture_missing "$needs_fixture"; then
-    record "$id" SKIP "UNSUPPORTED: $(jq -r .why <<<"$cell" | cut -c1-140)" "named gap: the fixture this cell needs is not in the tree yet"; continue
-  fi
+  # THREE ANSWERS, AND THE THIRD ONE IS A REFUSAL. This was `if oracle_fixture_missing …; then SKIP;
+  # fi` — and on a `needs_fixture` value that is not a shell identifier the indirect expansion
+  # inside that function aborts the whole `if`, so neither branch ran, the `continue` was never
+  # reached, and control fell through to here: THE CELL WAS RECORDED WITH ITS FIXTURE ABSENT, and
+  # whatever a busbar with no backend answers became the golden. A value the gate cannot read is
+  # neither "record it" nor "a named gap"; it is a corpus bug, and it is red.
+  oracle_fixture_missing "$needs_fixture"; nf_rc=$?
+  case "$nf_rc" in
+    0) record "$id" SKIP "UNSUPPORTED: $(jq -r .why <<<"$cell" | cut -c1-140)" "named gap: the fixture this cell needs is not in the tree yet"; continue ;;
+    1) ;;
+    *) record "$id" FAIL "needs_fixture is not a fixture gate: '${needs_fixture}'" \
+         "the fixture gate takes true, false, null, or the NAME of an environment variable (a shell identifier). A value it cannot read cannot say whether this cell's fixture is present, and a cell recorded without its fixture freezes the missing backend's answer into the golden."; continue ;;
+  esac
   case "$plane" in
     mcp|a2a) record "$id" SKIP "UNSUPPORTED: ${plane} is proven by its conformance rig, not recorded here" "named gap on the golden, never owed"; continue ;;
   esac

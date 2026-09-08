@@ -336,12 +336,41 @@ oracle_scrape_metrics() {  # <listen-port> <token> <out-file>
 #
 # DEFINED BEFORE THE SELFTEST BLOCK BELOW, which `exit`s on a direct `--selftest` run: a function
 # declared after it would never exist on that path.
-oracle_fixture_missing() {  # <needs_fixture value>
+#
+# ── THREE ANSWERS, BECAUSE THERE ARE THREE CASES ────────────────────────────────────────────────
+#   0  the fixture is MISSING — record the cell as a named gap
+#   1  RECORD the cell
+#   2  the value is not a fixture gate at all — REFUSE the cell; it is neither recordable nor a gap
+#
+# The third one is new and it is the finding. The env-gated arm was `[ -z "${!1:-}" ]`, and `${!1}`
+# demands a valid shell identifier. record.sh stringifies whatever the corpus author wrote
+# (`(.needs_fixture // false) | tostring`), so the argument can be any string — and on a value like
+# `a backend URL` bash 5.3 prints "invalid variable name" and ABORTS THE ENCLOSING COMPOUND COMMAND.
+# In record.sh that compound command is
+#
+#     if oracle_fixture_missing "$needs_fixture"; then record … SKIP …; continue; fi
+#
+# so NEITHER BRANCH RUNS, the `continue` is never reached, and execution falls through to the line
+# below it: THE CELL IS RECORDED, WITH ITS FIXTURE ABSENT. record.sh runs under `set -uo pipefail`
+# with no `-e`, so nothing stops the run. Whatever a busbar with no backend produces — a 500, a boot
+# refusal, an empty store — is then frozen into the golden as that cell's honest answer with a PASS
+# row, and the candidate reproduces it exactly. Reproduced on bash 5.3.15.
+#
+# A numeric value is the same hole by a different route: `needs_fixture: 1` makes `${!1}` indirect
+# onto the POSITIONAL parameter `$1` — which is the value itself, non-empty — and the cell records.
+#
+# So the name is validated before it is dereferenced, and a value that is not a valid identifier is
+# not guessed at: an unrecordable cell recorded anyway is the one outcome worse than a red row.
+oracle_fixture_missing() {  # <needs_fixture value> -> 0 gap | 1 record | 2 malformed
   case "${1-}" in
     ""|false|null) return 1 ;;
     true) return 0 ;;
-    *) [ -z "${!1:-}" ] ;;
   esac
+  # a POSIX shell name: letter or underscore, then letters, digits, underscores. Anything else —
+  # a sentence, a number, a URL, a typo'd `True` — is refused rather than dereferenced. Tested
+  # BEFORE `${!1}` is written, because the expansion itself is what takes the shell down.
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 2
+  [ -z "${!1:-}" ]
 }
 
 # ── selftest ─────────────────────────────────────────────────────────────────────────────────────
