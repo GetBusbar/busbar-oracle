@@ -4,6 +4,26 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.3
+
+- **A third register kind, `additive`, for growth the tool proves rather than an owner asserts.**
+  `improvement` can never take `body`/`headers` on a BODY_IS_CONTRACT family (rated 10 there), and
+  `breaking` would misdescribe a response that dropped nothing and changed no existing value —
+  neither fits a body that grew a key. `additive` may take `body` and `headers` ONLY when the tool
+  itself proves the candidate a superset of the golden at every path the golden defines: for
+  `body`, both sides must parse as JSON, every golden key/value must be present in the candidate
+  (recursively; extra keys allowed; arrays are a golden-prefix-of-candidate under the same rule
+  per element; a golden `null` growing into a value needs the path listed under `null_to_value`);
+  for `headers`, every golden header must be present with an equal value (extra headers allowed;
+  `content-length` exempt only when this same entry's body check passed). `status`, usage,
+  `effects.readback` and every `missing.*` class are never taken by `additive` — refused at load,
+  same as any class outside `{body, headers}` — and an `additive` entry must carry a `changelog`
+  line, exactly as `breaking` does. A failed proof leaves the cell red and the row names where:
+  `additive: not a superset at <json path / header>`. Fixes the second half of the rated-weight
+  problem: F-011's admin.ops views (`GetHooks`, `PostHooks`, `GetOpenapiJson`, ...) are
+  BODY_IS_CONTRACT and were owner-ruled additive growth, not breaking, with no register kind able
+  to say so without either being refused (`improvement`) or overclaiming (`breaking`).
+
 ## 0.3.2
 
 - **A fired transform may take a class it rendered identical, whatever that class is rated on
