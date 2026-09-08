@@ -663,10 +663,15 @@ rr_run "text_list_growth refuses a removed item" \
   'unknown overlay section `limits`: expected `groups`, `root`, or `plugin_versions`' \
   reject "additive: not a superset at list item"
 
-# (rr4) an item INSERTED mid-list (not appended at the end) -> RED.
-rr_run "text_list_growth refuses an item inserted mid-list" \
+# (rr4) an item INSERTED mid-list (not appended at the end) -> ACCEPTED SINCE 0.3.8, naming it.
+# THIS VERDICT MOVED, deliberately: through 0.3.7 golden's items had to be an ordered PREFIX of the
+# candidate's, so this case was red for the new item's POSITION and nothing else. Real enums grow
+# next to the item they refine (busbar's limit grammar puts the four token metrics beside `tokens`),
+# and the splice proof — golden's own list text put back must reproduce golden byte for byte — is
+# what was ever doing the work here; it holds identically wherever in the list the new item landed.
+rr_run "text_list_growth accepts an item inserted mid-list (set, not prefix)" \
   'unknown overlay section `limits`: expected `groups`, `hooks`, `NEW`, `root`, or `plugin_versions`' \
-  reject "additive: not a superset at list item"
+  accept "additive: added NEW"
 
 # (rr5) growth in TWO separate backtick lists in the same text -> RED, saying why: one declared
 # list per entry keeps the check narrow.
@@ -700,6 +705,58 @@ grep -qi "text_list_growth" "$W/out-rr6.log" && msg_ok=1 || msg_ok=0
 [ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
   && say PASS "an additive entry naming 'effects.stderr' without text_list_growth is refused at load" \
   || say FAIL "RR-6 bare-stderr-additive was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-rr6.log)"
+
+# (rr7..rr10) THE SECOND SPELLING AND THE SET RELATION (0.3.8). busbar's limit validator does not
+# backtick-quote its enum: it prints the alternation the way a grammar is written, `(requests |
+# tokens | budget | concurrent)` (boot.refusal|BOOT-P20|validate) and unparenthesised mid-sentence
+# (BOOT-P30). 0.3.7 saw NO list in either and refused with "no backtick list found" — the check was
+# reading a punctuation style, not an enum. These four cases pin the widened rule and, just as
+# importantly, where it still stops: the parens and every other byte of the template are held exact,
+# and a golden item that DISAPPEARED is still the first thing refused.
+
+# The paren cases need their own golden (the backtick one above is what rr1..rr4 compare against),
+# so they run through the same rr_run with the golden swapped in and back out around them.
+RR_PAREN_GOLDEN='unknown overlay section `limits`: a section is one of (groups | hooks | root | plugin_versions)'
+rr_paren_run() {  # <label> <candidate-text> <want> <needle>
+  rm -rf "$W/rr-golden-p"; cp -R "$FIX" "$W/rr-golden-p"
+  rr_body "$W/rr-golden-p/cells/self__b__stream.json" "$RR_PAREN_GOLDEN"
+  local saved="$W/rr-golden"; mv "$W/rr-golden" "$W/rr-golden-bt"; mv "$W/rr-golden-p" "$saved"
+  rr_run "$1" "$2" "$3" "$4"
+  rm -rf "$W/rr-golden"; mv "$W/rr-golden-bt" "$saved"
+}
+# (rr7) a paren-pipe list with an appended item -> ACCEPTED. RED under 0.3.7 ("no backtick list
+# found"): the only backticked thing in the sentence is a lone quoted word, so 0.3.7 saw no list.
+rr_paren_run "text_list_growth reads a pipe-separated list inside parentheses, naming the added item" \
+  'unknown overlay section `limits`: a section is one of (groups | hooks | root | plugin_versions | identity-providers)' \
+  accept "additive: added identity-providers"
+
+# (rr8) the SAME paren-pipe list, grown MID-list -- both new things at once, which is the exact
+# shape of BOOT-P20: `(requests | tokens | tokens_input | ... | budget | concurrent)`.
+rr_paren_run "text_list_growth accepts a mid-list insertion into a paren-pipe list" \
+  'unknown overlay section `limits`: a section is one of (groups | hooks | NEW | root | plugin_versions)' \
+  accept "additive: added NEW"
+
+# (rr9) a candidate that DROPS a golden item is STILL RED -- naming the item, and by its position in
+# the GOLDEN's list, which is the list the reader has. The widening is about ORDER, never membership.
+rr_paren_run "text_list_growth still refuses a dropped item, naming it" \
+  'unknown overlay section `limits`: a section is one of (groups | root | plugin_versions | identity-providers)' \
+  reject "additive: not a superset at list item 1 ('hooks' is in the golden's list and not in the candidate's)"
+
+# (rr10) a candidate that REORDERS golden's items and adds NOTHING -> ACCEPTED, as a set superset.
+# THIS IS A DELIBERATE WIDENING and the one case that gains no new item: 0.3.7 refused it as "added
+# no new items". A reordered operator-visible list is still a change nobody announced (see F-013's
+# BOOT-020 narrowing in busbar's register, where exactly that was fixed rather than forgiven) -- but
+# it is not this check's job to catch it twice: an entry naming the cell, with a changelog line and
+# a declared width, still has to exist and be written by a person before any of this runs.
+rr_paren_run "text_list_growth accepts a pure reorder as a set superset (deliberate widening)" \
+  'unknown overlay section `limits`: a section is one of (hooks | groups | plugin_versions | root)' \
+  accept "additive: the declared list was REORDERED, no items added or dropped"
+
+# (rr11) a list that changed how it is SPELLED -- backticked in the golden, pipe-separated in the
+# candidate, same items -- is a TEMPLATE change and stays red, however set-like the membership is.
+rr_run "text_list_growth refuses a list that changed spelling (backtick -> pipe)" \
+  'unknown overlay section `limits`: expected groups|hooks|root|plugin_versions' \
+  reject "paired a backtick list with a pipe list"
 
 # (ss) `text_list_growth` REACHES A STRING LEAF INSIDE AN OTHERWISE-SUPERSET JSON BODY, not just a
 # plain-text body. admin.ops|DeleteOverlaySection|not-found's real shape is JSON — the enum lives at
@@ -780,10 +837,11 @@ ss_run "leaf text_list_growth refuses a removed item, naming the path" \
   'unknown overlay section `limits`: expected `groups`, `root`, or `plugin_versions`' \
   "see docs" reject "additive: not a superset at /error/message"
 
-# (ss4) an item INSERTED mid-list inside the leaf -> RED, naming the path.
-ss_run "leaf text_list_growth refuses an item inserted mid-list, naming the path" \
+# (ss4) an item INSERTED mid-list inside the leaf -> ACCEPTED SINCE 0.3.8, naming path + item. The
+# same widening as (rr4), reached through the JSON walk: the leaf is fed to the same check.
+ss_run "leaf text_list_growth accepts an item inserted mid-list, naming path + item" \
   'unknown overlay section `limits`: expected `groups`, `hooks`, `NEW`, `root`, or `plugin_versions`' \
-  "see docs" reject "additive: not a superset at /error/message"
+  "see docs" accept "added NEW at /error/message"
 
 # (ss5) growth in TWO backtick lists inside the SAME leaf's text -> RED, same reason as (rr5). Needs
 # its own golden (also carrying two lists) so the counts still pair — a golden with ONE list and a
@@ -2562,6 +2620,83 @@ esac
 grep -q "OO-1 body wording" "$W/out-oo-a.log" \
   && say PASS "the entry that lost reach is named on stderr when the register loads" \
   || say FAIL "no entry was named when the register loaded, so the narrowing is silent"
+
+# (pp) THE THREE REAL CELLS THIS RELEASE EXISTS FOR, ON THE CLASS THEY REALLY DIVERGE ON. busbar's
+# `boot.refusal|BOOT-P20|validate`, `|BOOT-P29|` and `|BOOT-P30|` are exec cells whose contract is
+# `effects.stderr`, and its register entry F-013 is already `kind: additive, text_list_growth: true`
+# over exactly those three ids. All three say the same thing — a limit's metric enum gained the four
+# token metrics 1.6.0 added (`tokens_input`, `tokens_output`, `tokens_cache_read`,
+# `tokens_cache_write`) — and all three were RED under 0.3.7, each for a different reason that was
+# about PUNCTUATION AND POSITION rather than about anything the message stopped saying:
+#   P20  `(requests | tokens | budget | concurrent)`      -> "no backtick list found"
+#   P29  `` `requests`, `tokens`, … `downgrade_to` ``     -> "not a superset at list item 2"  (the
+#                                                            new keys land beside `tokens`, not last)
+#   P30  `requests|tokens|budget|concurrent` mid-sentence -> "no backtick list found"
+# The texts below are 1.5.5's recorded stderr and 1.6.0's own source strings for the same three
+# messages (crates/busbar-substrate/src/config/groups.rs: LimitVisitor's `expecting`, its
+# `unknown_field` list, and the missing-metric `custom` error), with the diagnostic-code prefix the
+# register's D-1 transform already removes on both sides left off, so what is compared here is the
+# wording difference and nothing else.
+pp_stderr() {  # <cell-json> <case> <side>
+  python3 - "$1" "$2" "$3" <<'EOF'
+import json, sys
+p, case, side = sys.argv[1], sys.argv[2], sys.argv[3]
+WARN = ("[warn] BUSBAR_PROVIDERS is DEPRECATED; set `providers_file:` in config.yaml instead "
+        "(it is honored for now).\n")
+FRAME = "[error] config.yaml: invalid YAML: groups.broke.limits[0]: "
+TAIL = " at line 27 column 7\n"
+TEXT = {
+  ("P20", "golden"):
+    "a limit needs exactly one metric key (requests | tokens | budget | concurrent)",
+  ("P20", "candidate"):
+    "a limit needs exactly one metric key (requests | tokens | tokens_input | tokens_output | "
+    "tokens_cache_read | tokens_cache_write | budget | concurrent)",
+  ("P29", "golden"):
+    "unknown field `bogus`, expected one of `requests`, `tokens`, `budget`, `concurrent`, `per`, "
+    "`pool`, `on_exhaust`, `downgrade_to`",
+  ("P29", "candidate"):
+    "unknown field `bogus`, expected one of `requests`, `tokens`, `tokens_input`, `tokens_output`, "
+    "`tokens_cache_read`, `tokens_cache_write`, `budget`, `concurrent`, `per`, `pool`, "
+    "`on_exhaust`, `downgrade_to`",
+  ("P30", "golden"):
+    "invalid type: string \"requests\", expected a limit map "
+    "`{ <metric>: <amount>, per: <window>, pool: <name> }` where <metric> is one of "
+    "requests|tokens|budget|concurrent and <window> one of minute|hour|day|month|total "
+    "(omit `per` for concurrent; `pool` is optional and scopes the limit to one pool's traffic)",
+  ("P30", "candidate"):
+    "invalid type: string \"requests\", expected a limit map "
+    "`{ <metric>: <amount>, per: <window>, pool: <name> }` where <metric> is one of "
+    "requests|tokens|tokens_input|tokens_output|tokens_cache_read|tokens_cache_write|budget|"
+    "concurrent and <window> one of minute|hour|day|month|total "
+    "(omit `per` for concurrent; `pool` is optional and scopes the limit to one pool's traffic)",
+}
+d = json.load(open(p))
+d.setdefault("effects", {})["stderr"] = WARN + FRAME + TEXT[(case, side)] + TAIL
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+cat >"$W/pp-accept.json" <<'JSON'
+{"accepted":[{"id":"PP-1 validation wording (F-013 shape)","kind":"additive","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"classes":["effects.stderr"],"changelog":"selftest: validation messages know the new limit metrics","rationale":"selftest: the three real BOOT-P cells, on effects.stderr","text_list_growth":true}]}
+JSON
+pp_run() {  # <case>
+  local case="$1"
+  rm -rf "$W/pp-golden" "$W/pp-cand" "$W/out-pp"
+  cp -R "$FIX" "$W/pp-golden"; cp -R "$FIX" "$W/pp-cand"
+  pp_stderr "$W/pp-golden/cells/self__b__stream.json" "$case" golden
+  pp_stderr "$W/pp-cand/cells/self__b__stream.json"   "$case" candidate
+  bash "${here}/replay.sh" --golden "$W/pp-golden" --candidate "$W/pp-cand" --out "$W/out-pp" --cells "$W/rr-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$W/pp-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-pp.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-pp/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  local want="additive: added tokens_input, tokens_output, tokens_cache_read, tokens_cache_write"
+  [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$diff_col" == *"$want"* ]] \
+    && say PASS "BOOT-$case's real refusal text is proved additive on effects.stderr, naming the four new metrics" \
+    || say FAIL "BOOT-$case did not go green under additive+text_list_growth: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
+}
+pp_run P20
+pp_run P29
+pp_run P30
 
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
