@@ -4,6 +4,24 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.5
+
+- **`text_list_growth` reaches a string LEAF inside a JSON body, not only a plain-text body.**
+  `admin.ops|DeleteOverlaySection|not-found`'s enum lives at `/error/message` inside a JSON
+  envelope, not in a plain-text body. `additive_superset()`'s walk now defers a STRING leaf
+  mismatch (collecting the JSON pointer, golden value and candidate value) instead of failing on
+  it immediately; every other mismatch (a missing key, a short array, a non-string scalar, an
+  uncovered `null`) still fails the walk immediately, unchanged. After the walk: zero deferred
+  leaves is a plain superset as before; exactly one is fed to the existing
+  `text_list_growth_check()` proof, naming the leaf's JSON pointer on both the accepted row and a
+  refusal; more than one differing leaf is refused by name, naming every path — a second leaf
+  moving is not "one list grew" under either leaf's own story. Verified against busbar's real
+  Oxford-comma shape on both sides (golden "...`root`, or `plugin_versions`"; a grown candidate
+  "...`plugin_versions`, ..., or `agents`"): list membership is defined by extracting
+  backtick-quoted tokens via a run regex whose separator alternation treats "or" purely as prose
+  glue wherever it falls, never as an item of its own, so the Oxford "or" moving to before the new
+  last item as the list grows needs no special case.
+
 ## 0.3.4
 
 - **`additive` gains `text_list_growth: true`, the same superset proof for a key-list named in
