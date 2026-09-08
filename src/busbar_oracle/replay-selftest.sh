@@ -701,6 +701,115 @@ grep -qi "text_list_growth" "$W/out-rr6.log" && msg_ok=1 || msg_ok=0
   && say PASS "an additive entry naming 'effects.stderr' without text_list_growth is refused at load" \
   || say FAIL "RR-6 bare-stderr-additive was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-rr6.log)"
 
+# (ss) `text_list_growth` REACHES A STRING LEAF INSIDE AN OTHERWISE-SUPERSET JSON BODY, not just a
+# plain-text body. admin.ops|DeleteOverlaySection|not-found's real shape is JSON — the enum lives at
+# `/error/message` — so the proof has to run additive_superset()'s ordinary walk (extra keys allowed,
+# every other value equal) and apply text_list_growth_check() ONLY at the one string leaf that
+# differs, deferring rather than failing on a string mismatch mid-walk. The real target text uses
+# busbar's actual Oxford "or" before the LAST item on both sides (golden: "...`root`, or
+# `plugin_versions`"; grown candidate: "...`plugin_versions`, ..., or `agents`") — proving the splice
+# still holds however this list is punctuated, wherever "or" was in the run.
+ss_cells() {  # <out> — self|a|ok reclassified onto a BODY_IS_CONTRACT family, like admin.ops
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = "admin.ops"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+ss_cells "$W/ss-cells.json"
+cat >"$W/ss-accept.json" <<'JSON'
+{"accepted":[{"id":"SS-1 leaf list growth","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["body"],"changelog":"selftest: overlay section enum grows additively","rationale":"selftest: text_list_growth on a JSON leaf","text_list_growth":true}]}
+JSON
+ss_msg() {  # <out-cell-json> <message> [<hint>]
+  python3 - "$1" "$2" "${3:-}" <<'EOF'
+import json, sys
+p, msg, hint = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(p))
+d["body"]["json"]["error"] = {"message": msg}
+if hint:
+    d["body"]["json"]["hint"] = hint
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+}
+SS_GOLDEN='unknown overlay section `limits`: expected `groups`, `hooks`, `root`, or `plugin_versions`'
+cp -R "$FIX" "$W/ss-golden"
+ss_msg "$W/ss-golden/cells/self__a__ok.json" "$SS_GOLDEN" "see docs"
+
+ss_run() {  # <label> <candidate-message> <candidate-hint> <want: accept|reject> <needle>
+  local label="$1" cmsg="$2" chint="$3" want="$4" needle="$5"
+  rm -rf "$W/ss-cand"; cp -R "$FIX" "$W/ss-cand"
+  ss_msg "$W/ss-cand/cells/self__a__ok.json" "$cmsg" "$chint"
+  rm -rf "$W/out-ss"
+  bash "${here}/replay.sh" --golden "$W/ss-golden" --candidate "$W/ss-cand" --out "$W/out-ss" --cells "$W/ss-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$W/ss-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-ss.log" 2>&1
+  rc=$?
+  row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-ss/ledger.tsv")"
+  status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+  if [ "$want" = accept ]; then
+    if [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$diff_col" == *"$needle"* ]]; then
+      say PASS "$label"
+    else
+      say FAIL "$label (rc=$rc status=$status_col title=$title_col diff='$diff_col')"
+    fi
+  else
+    if [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"$needle"* ]]; then
+      say PASS "$label"
+    else
+      say FAIL "$label (rc=$rc status=$status_col diff='$diff_col')"
+    fi
+  fi
+}
+
+# (ss1) pure appended items, on the real Oxford-"or" shape -> ACCEPTED, naming the JSON pointer and
+# the items.
+ss_run "text_list_growth reaches a JSON leaf: pure appended items (Oxford 'or'), naming path + items" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`' \
+  "see docs" accept "added identity-providers, export, tools, agents at /error/message"
+
+# (ss2) the template word changed ALONGSIDE the growth -> RED, naming the leaf's path AND the first
+# differing byte.
+ss_run "leaf text_list_growth refuses a reworded template beside real growth, naming path + byte" \
+  'unknown overlay section `limits`: expected one of `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers`, `export`, `tools`, or `agents`' \
+  "see docs" reject "additive: not a superset at /error/message (not a superset at text byte"
+
+# (ss3) an item REMOVED from golden's list, inside the leaf -> RED, naming the path.
+ss_run "leaf text_list_growth refuses a removed item, naming the path" \
+  'unknown overlay section `limits`: expected `groups`, `root`, or `plugin_versions`' \
+  "see docs" reject "additive: not a superset at /error/message"
+
+# (ss4) an item INSERTED mid-list inside the leaf -> RED, naming the path.
+ss_run "leaf text_list_growth refuses an item inserted mid-list, naming the path" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `NEW`, `root`, or `plugin_versions`' \
+  "see docs" reject "additive: not a superset at /error/message"
+
+# (ss5) growth in TWO backtick lists inside the SAME leaf's text -> RED, same reason as (rr5). Needs
+# its own golden (also carrying two lists) so the counts still pair — a golden with ONE list and a
+# candidate with two is the "could not pair" case, a different refusal from "touched more than one".
+rm -rf "$W/ss-golden5"; cp -R "$FIX" "$W/ss-golden5"
+ss_msg "$W/ss-golden5/cells/self__a__ok.json" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, or `plugin_versions` in file `a`, `b`, or `c`' "see docs"
+rm -rf "$W/ss-cand5"; cp -R "$FIX" "$W/ss-cand5"
+ss_msg "$W/ss-cand5/cells/self__a__ok.json" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, `identity-providers` in file `a`, `b`, `c`, `d`' "see docs"
+rm -rf "$W/out-ss5"
+bash "${here}/replay.sh" --golden "$W/ss-golden5" --candidate "$W/ss-cand5" --out "$W/out-ss5" --cells "$W/ss-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/ss-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-ss5.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-ss5/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$diff_col" == *"more than one backtick list"* ]] \
+  && say PASS "leaf text_list_growth refuses growth in two lists inside one leaf" \
+  || say FAIL "leaf two-lists-in-one-leaf was not red-with-reason: rc=$rc status=$status_col diff='$diff_col'"
+
+# (ss6) TWO DIFFERENT LEAVES differ (message grew its list AND hint changed) -> RED, naming BOTH
+# JSON pointers -- one leaf's own story is never enough to explain a second leaf moving too.
+ss_run "two differing string leaves are refused together, naming both paths" \
+  'unknown overlay section `limits`: expected `groups`, `hooks`, `root`, `plugin_versions`, or `identity-providers`' \
+  "see the docs" reject "more than one differing string leaf: /error/message, /hint"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
