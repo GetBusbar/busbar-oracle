@@ -241,17 +241,18 @@ def additive_superset(golden, cand, path: str, null_to_value: set, string_diffs:
     into a deferred one: `(path, golden_str, cand_str)` is appended and the walk continues, instead
     of stopping at the first string that differs. This is what lets the caller apply
     `text_list_growth_check()` to a leaf embedded inside an otherwise-superset JSON body (an error
-    message field that grew its own backtick list) while still catching a SECOND differing leaf as
-    a real divergence — two strings that changed is not "one list grew", whatever either one says
-    on its own. Every other mismatch (a missing key, a short array, a non-string scalar, a `null`
+    message field that grew its own backtick list). Since 0.3.9 the caller proves EVERY collected
+    leaf, not just one: the same fact can be written down in several leaves of one document, and a
+    leaf that is not growth still refuses the cell — naming itself. Every other mismatch (a missing
+    key, a short array, a non-string scalar, a `null`
     not covered by `null_to_value`) is unaffected and fails immediately, exactly as before: this
     parameter only ever WIDENS what continues walking, never what ultimately passes.
 
     `description_corrections`, when it names `path`, forgives a STRING leaf's mismatch OUTRIGHT —
     no growth proof, no relation to check, just a registered claim that 1.5.5's prose was wrong and
-    this is the correction. Checked BEFORE `string_diffs`, so a corrected leaf never competes for
-    the one slot `text_list_growth` allows: an entry may correct a description AND separately prove
-    growth on a different leaf in the same body. `corrections_report`, when passed a list, records
+    this is the correction. Checked BEFORE `string_diffs`, so a corrected leaf is never also asked
+    to prove growth: an entry may correct a description AND separately prove growth on other leaves
+    in the same body. `corrections_report`, when passed a list, records
     `(path, golden_str, cand_str)` for every leaf forgiven this way, for the accepted row to name."""
     if golden is None and cand is not None:
         return None if path in null_to_value else (path or "/")
@@ -367,6 +368,18 @@ def _first_diff_byte(a: str, b: str) -> int:
         if x != y:
             return i
     return min(len(a), len(b))
+
+
+def _rewrite(rules, text: str) -> str:
+    """`text` with every `(compiled_rx, repl)` in `rules` applied in order, or `text` unchanged when
+    `rules` is empty. This is the SAME rewrite the `transform` branch of main() performs, factored
+    out so an `additive` entry that names a transform (0.3.9) applies it to BOTH sides of a pair
+    before the growth proof runs. Symmetric by construction — the caller passes it the golden and
+    the candidate — so it can only ever REMOVE a difference the register already named, never
+    manufacture one."""
+    for rx, repl in rules or []:
+        text = rx.sub(repl, text)
+    return text
 
 
 def _sans_additive_prefix(note: str) -> str:
@@ -1000,10 +1013,31 @@ def main() -> int:
             # class are refused here regardless of `classes`, because there is no superset relation
             # for "the request succeeded" or "the money moved" — those are equal or they are not.
             if base["kind"] == "additive":
-                if "transform" in e:
-                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and also carries a "
-                             f"`transform` — additive proves growth by inspecting the recorded pair, never by "
-                             f"rewriting it first. Use one register kind or the other.")
+                # AN `additive` ENTRY MAY NAME A `transform`, AND THE REWRITE HAPPENS FIRST (0.3.9).
+                # Through 0.3.8 this was refused at load ("additive proves growth by inspecting the
+                # recorded pair, never by rewriting it first. Use one register kind or the other"),
+                # and the two kinds could not both be true of one cell — which busbar's own
+                # `boot.refusal|BOOT-P20|validate` (and P29, P30) is: 1.6.0 stamps a diagnostic code
+                # onto the refusal line (D-1's `[error] BUSBAR-3015: `, already a registered,
+                # line-precise, symmetric rewrite) AND the limit-metric enum on that same line grew
+                # by the four token metrics. Neither kind could take it alone: `transform` credits a
+                # class only when the REWRITTEN PAIR IS BYTE-IDENTICAL, and it is not (the list
+                # grew); `additive` saw the raw pair, where the prefix is one more thing that moved,
+                # and refused it as a template change. Splitting the cell between two entries cannot
+                # express it either — the two changes are on the SAME line, and each entry would
+                # have to forgive the other's difference to be credited for its own.
+                # So the rewrite is applied to BOTH sides first (`_rewrite()`, the same symmetric
+                # normalization the transform branch performs) and the growth proof then runs on the
+                # rewritten pair. NOTHING IS WEAKENED BY THE ORDER: the transform is still held to
+                # `transform_pattern_too_broad()` (it must name a specific token, never a shape wide
+                # enough to swallow arbitrary content) and to a declared `cells` scope, and the
+                # growth proof is still the whole of what forgives the class — a pair the rewrite
+                # made byte-identical is `text_list_growth_check`'s `golden == cand` case, which
+                # returns "nothing added", and anything the rewrite did NOT reconcile still has to
+                # be list growth and nothing else. What the entry does NOT get is the transform
+                # branch's wholesale credit: an `additive` entry carrying a transform is NEVER added
+                # to `transforms`, so the fired-transform path that hands a cell's raw class list to
+                # the accepted column never runs for it. It claims exactly the classes it proves.
                 extra = base["allowed"] - ADDITIVE_CLASSES
                 if extra:
                     sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive but names {sorted(extra)} — "
@@ -1132,8 +1166,9 @@ def main() -> int:
                                  f"byte-identical, so its pattern must name a specific token, never a shape wide "
                                  f"enough to swallow arbitrary content.")
                 base["transform"] = [(re.compile(rx, re.M), repl) for rx, repl in e["transform"]["candidate"]]
-                transforms.append(base)
-            elif base["kind"] == "additive":
+                if base["kind"] != "additive":
+                    transforms.append(base)
+            if base["kind"] == "additive":
                 # JSON-pointer-style paths (`/pools/0/name`) where a golden `null` is allowed to grow
                 # into a real value. Not a default: `null` staying `null` is a claim the field is
                 # genuinely absent, and letting it grow ANYWHERE for free would let additive quietly
@@ -1142,8 +1177,11 @@ def main() -> int:
                 base["text_list_growth"] = bool(e.get("text_list_growth", False))
                 base["description_corrections"] = set(e.get("description_corrections", []) or [])
                 base["new_route"] = bool(e.get("new_route", False))
+                # An additive entry that named no `transform` rewrites nothing: `_rewrite([], s)` is
+                # `s`, so every path below is byte-identical to 0.3.8 for such an entry.
+                base.setdefault("transform", [])
                 additive.append(base)
-            else:
+            elif "transform" not in e:
                 accepted.append(base)
     # ── WHICH ENTRIES CAN NO LONGER FORGIVE WHAT THEY NAME ──────────────────────────────────────
     # Said at LOAD, over the whole corpus, so the register's owners learn it from a run rather than
@@ -1379,8 +1417,10 @@ def main() -> int:
                         ctext = cc.get("body", {}).get("text") if isinstance(cc.get("body"), dict) else None
                         if e["text_list_growth"] and isinstance(gtext, str) and isinstance(ctext, str):
                             # a plain-text body (SSE, CLI stdout): the whole body IS the one string
-                            # to prove growth on, same as effects.stderr below.
-                            removed, note = text_list_growth_check(gtext, ctext)
+                            # to prove growth on, same as effects.stderr below. The entry's own
+                            # transform (0.3.9), if it named one, is applied to BOTH sides first.
+                            removed, note = text_list_growth_check(_rewrite(e["transform"], gtext),
+                                                                   _rewrite(e["transform"], ctext))
                             if removed is not None:
                                 claimed.add("body"); body_ok = True
                                 additive_removed.append({"entry": e["id"], "class": "body", "removed": removed}
@@ -1395,38 +1435,81 @@ def main() -> int:
                                 additive_note = ("additive: body is not JSON on both sides" if not e["text_list_growth"]
                                                  else "additive: body has no text or JSON on both sides for text_list_growth")
                             else:
-                                # `string_diffs` (only under `text_list_growth`) defers a STRING
-                                # leaf mismatch instead of failing on it immediately, so an
-                                # error-message field that grew its own backtick list can still pass
-                                # — but only when it is the ONLY leaf that differs; two differing
-                                # leaves is not "one list grew" under either leaf's own story.
-                                # `description_corrections` forgives a NAMED leaf's mismatch
-                                # outright (checked first inside additive_superset, so a corrected
-                                # leaf never competes for text_list_growth's one slot).
-                                string_diffs = [] if e["text_list_growth"] else None
+                                # `string_diffs` defers a STRING leaf mismatch instead of failing on
+                                # it immediately, so an error-message field that grew its own
+                                # backtick list can still pass. `description_corrections` forgives a
+                                # NAMED leaf's mismatch outright (checked first inside
+                                # additive_superset, so a corrected leaf is never asked to prove
+                                # growth as well).
+                                #
+                                # EVERY GROWN LEAF, NOT ONE SLOT (0.3.9). Through 0.3.8 a SECOND
+                                # differing string leaf was the end of it — "text_list_growth found
+                                # more than one differing string leaf: …" — on the reasoning that
+                                # two strings that changed is not "one list grew". That reasoning
+                                # priced a real document wrong: one release-note-worthy fact can be
+                                # written down in several leaves of the SAME body, and busbar's
+                                # `admin.ops|GetOpenapiJson|ok` is the case — the overlay-section
+                                # enum growing by four names is stated three times in the DELETE
+                                # `/api/v1/admin/overlay/{section}` operation (its `summary`, its
+                                # 400 `description`, and the `OverlayResetView.reset` description),
+                                # and 0.3.8 refused the cell for the COUNT of leaves that moved
+                                # rather than for anything any one of them said.
+                                # So each differing leaf is now proved ON ITS OWN TERMS, by the same
+                                # check, and the cell is forgiven only when EVERY one of them is
+                                # growth: N leaves that each grow as a set (the 0.3.8 relation,
+                                # unchanged) and a verdict that names each with its own path and its
+                                # own added items. NOTHING IS LOOSER PER LEAF — a leaf that changed
+                                # in any other way still refuses the cell, and now names ITSELF and
+                                # its own reason instead of a leaf count, which is the message a
+                                # reader can act on. `additive_superset`'s hard failures (a missing
+                                # key, a short array, a non-string scalar, an uncovered `null`) are
+                                # untouched and still stop the walk at the first one.
+                                string_diffs = [] if (e["text_list_growth"] or e["transform"]) else None
                                 corrections_report = []
                                 bad = additive_superset(gj, cj, "", e["null_to_value"], string_diffs,
                                                         e["description_corrections"], corrections_report)
                                 if bad is not None:
                                     additive_note = f"additive: not a superset at {bad}"
-                                elif string_diffs and len(string_diffs) > 1:
-                                    paths = ", ".join(p for p, _, _ in string_diffs)
-                                    additive_note = f"additive: text_list_growth found more than one differing string leaf: {paths}"
                                 elif string_diffs:
-                                    leaf_path, gstr, cstr = string_diffs[0]
-                                    removed, note = text_list_growth_check(gstr, cstr)
-                                    if removed is not None:
+                                    leaf_rows, leaf_bad = [], []
+                                    for leaf_path, gstr, cstr in string_diffs:
+                                        # the entry's own transform, applied to BOTH sides, BEFORE
+                                        # the proof (0.3.9): what the register already named as a
+                                        # rewrite is not a second thing this leaf changed.
+                                        gs2 = _rewrite(e["transform"], gstr)
+                                        cs2 = _rewrite(e["transform"], cstr)
+                                        if not e["text_list_growth"]:
+                                            # a transform-only additive entry buys the rewrite and
+                                            # nothing else: the leaf must be EQUAL once it is applied.
+                                            if gs2 == cs2:
+                                                leaf_rows.append({"entry": e["id"], "class": "body", "path": leaf_path,
+                                                                  "note": f"identical after the accepted rewrite at {leaf_path}"})
+                                            else:
+                                                leaf_bad.append(f"{leaf_path} (still differs after the accepted rewrite)")
+                                            continue
+                                        removed, note = text_list_growth_check(gs2, cs2)
+                                        if removed is None:
+                                            leaf_bad.append(f"{leaf_path} ({_sans_additive_prefix(note)})")
+                                        elif removed:
+                                            leaf_rows.append({"entry": e["id"], "class": "body",
+                                                              "path": leaf_path, "removed": removed})
+                                        elif gs2 != cs2:
+                                            leaf_rows.append({"entry": e["id"], "class": "body", "path": leaf_path,
+                                                              "note": f"{_REORDER_NOTE} at {leaf_path}"})
+                                        else:
+                                            leaf_rows.append({"entry": e["id"], "class": "body", "path": leaf_path,
+                                                              "note": f"identical after the accepted rewrite at {leaf_path}"})
+                                    if leaf_bad:
+                                        # EVERY leaf that failed is named, not just the first: a
+                                        # reader fixing one of them wants to know about the others
+                                        # in the same run.
+                                        additive_note = "additive: not a superset at " + "; ".join(leaf_bad)
+                                    else:
                                         claimed.add("body"); body_ok = True
-                                        additive_removed.append(
-                                            {"entry": e["id"], "class": "body", "path": leaf_path, "removed": removed}
-                                            if removed else
-                                            {"entry": e["id"], "class": "body", "path": leaf_path,
-                                             "note": f"{_REORDER_NOTE} at {leaf_path}"})
+                                        additive_removed.extend(leaf_rows)
                                         if corrections_report:
                                             additive_removed.append({"entry": e["id"], "class": "body",
                                                                      "corrections": corrections_report})
-                                    else:
-                                        additive_note = f"additive: not a superset at {leaf_path} ({_sans_additive_prefix(note)})"
                                 else:
                                     claimed.add("body"); body_ok = True
                                     if corrections_report:
@@ -1442,13 +1525,23 @@ def main() -> int:
                         gtext = (g.get("effects") or {}).get("stderr")
                         ctext = (cc.get("effects") or {}).get("stderr")
                         if isinstance(gtext, str) and isinstance(ctext, str):
-                            removed, note = text_list_growth_check(gtext, ctext)
+                            # the entry's own transform, applied to BOTH sides, BEFORE the growth
+                            # proof (0.3.9). This is the BOOT-P20/P29/P30 shape: 1.6.0 stamps
+                            # `BUSBAR-3015: ` onto the refusal line AND grows the limit-metric enum
+                            # on that same line, and neither the transform kind (which needs the
+                            # rewritten pair byte-identical) nor 0.3.8's additive (which saw the
+                            # prefix as a second change) could take it alone.
+                            gt2 = _rewrite(e["transform"], gtext)
+                            ct2 = _rewrite(e["transform"], ctext)
+                            removed, note = text_list_growth_check(gt2, ct2)
                             if removed is not None:
                                 claimed.add("effects.stderr")
                                 additive_removed.append(
                                     {"entry": e["id"], "class": "effects.stderr", "removed": removed}
                                     if removed else
-                                    {"entry": e["id"], "class": "effects.stderr", "note": _REORDER_NOTE})
+                                    {"entry": e["id"], "class": "effects.stderr",
+                                     "note": _REORDER_NOTE if gt2 != ct2
+                                     else "identical after the accepted rewrite"})
                             else:
                                 additive_note = note
                         else:
