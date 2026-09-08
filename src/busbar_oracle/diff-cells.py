@@ -448,6 +448,10 @@ def main() -> int:
     ap.add_argument("--accepted", default=os.path.join(DATA, "accepted-differences.json"),
                     help="the product's register of forgiven divergences. "
                          "Default: $BUSBAR_ORACLE_DATA/accepted-differences.json")
+    ap.add_argument("--refuse-extra-candidate", action="store_true",
+                    help="make `extra.candidate` rows FAIL instead of PASS. A cell the candidate "
+                         "recorded that the golden does not owe is not a divergence — nothing was "
+                         "compared — so it is VISIBLE by default and red only when a caller says so")
     ap.add_argument("--allow-harness-skew", action="store_true",
                      help="proceed even if golden and candidate were produced by different (or unrecorded) "
                           "testing/shadow-oracle revisions; without this the differ refuses to compare them")
@@ -721,6 +725,57 @@ def main() -> int:
                         **({"platform": _skew} if (_skew := host_rule_skew(g, cc)) else {}),
                         **({"accepted": {"id": acc["id"], "kind": acc["kind"], "rationale": acc["rationale"], "by": acc["by"]}} if acc else {})})
 
+    # ── WHAT THE CANDIDATE RECORDED THAT NOTHING HERE COMPARED ──────────────────────────────────
+    # Every loop above walks the OWED set, which is derived from the golden. A cell file the
+    # candidate wrote that the golden does not owe is therefore invisible to all of it: no row, no
+    # class, no line anywhere. Three real things wear that shape and all three matter —
+    #
+    #   * a cell that exists in cells.json but which the GOLDEN could not record (a named gap). The
+    #     candidate can record it fine, which is precisely the evidence that the gap has closed, and
+    #     the gap register is where that belongs. Today it is simply not mentioned.
+    #   * a cell id that is in NEITHER the golden's owed set nor cells.json — a RENAME. The old id
+    #     leaves the corpus (see the owed-baseline check in replay.sh) and the new one lands here.
+    #     Reporting only the disappearance names half of a rename and makes it look like a deletion.
+    #   * a stale file from an EARLIER recording into the same --out (record.sh does not clear the
+    #     directory per run for cells it did not select), which is a candidate carrying cells no
+    #     binary in this run produced.
+    #
+    # It is its own class and NOT a member of CLASS_ORDER: CLASS_ORDER names ways an owed cell can
+    # DIVERGE, each with a weight, a money rating and a `compare` policy, and nothing was compared
+    # here at all. So it is reported — on its own row, in its own file, in report.json and report.md
+    # — and it is not red unless a caller asks (--refuse-extra-candidate). Silence was the bug; red
+    # would be a false one, because a candidate recording more than the golden owes is usually the
+    # gate's own coverage growing.
+    extra = []
+    cand_cells_dir = os.path.join(a.candidate, "cells")
+    filtered = bool(fam_rx or id_rx)
+    if os.path.isdir(cand_cells_dir):
+        safe_to_id = {safe_name(cid): cid for cid in all_cell_ids}
+        owed_set, selected = set(owed), set(by_id)
+        unknown_suppressed = 0
+        for fn in sorted(os.listdir(cand_cells_dir)):
+            if not fn.endswith(".json"):
+                continue
+            cid = safe_to_id.get(fn[:-5])
+            if cid is None:
+                # A file whose id is not in cells.json cannot be tested against --family/--id-filter
+                # (it has no family and no row to match), so under a filtered run it is counted and
+                # named in aggregate rather than reported as if the filter were not there.
+                if filtered:
+                    unknown_suppressed += 1
+                    continue
+                extra.append((fn[:-5], "no cell of this id is in cells.json — a rename, a removed "
+                                       "cell, or a file left by an earlier recording into this --out"))
+            elif cid in owed_set or cid not in selected:
+                continue
+            else:
+                gs, gd = gl.get(cid, ("MISSING", "no golden ledger row"))
+                extra.append((cid, f"the candidate recorded it; the golden does not owe it ({gs}: {gd})"))
+        if unknown_suppressed:
+            sys.stderr.write(f"diff-cells: {unknown_suppressed} candidate cell file(s) name ids that are "
+                             f"not in {os.path.basename(a.cells)}; not reported because this run is "
+                             f"filtered and they cannot be tested against the filter\n")
+
     fam_table = {}
     for fam, s in sorted(fam_stats.items()):
         fam_table[fam] = {"owed": s["owed"], "diverging": s["diverging"], "accepted": s["accepted"], "owed_w": s["owed_w"], "div_w": s["div_w"],
@@ -734,9 +789,10 @@ def main() -> int:
         "totals": {"cells_in_scope": len(cells), "owed": len(owed), "gaps": len(gaps),
                    "diverging": sum(1 for r in results if r["classes"] and "accepted" not in r),
                    "accepted": sum(1 for r in results if "accepted" in r), "W": W, "D": D,
-                   "ratio": (D / W) if W else 0.0},
+                   "ratio": (D / W) if W else 0.0, "extra_candidate": len(extra)},
         "by_family": fam_table, "by_class": dict(class_counts),
         "gaps": [{"id": i, "golden_status": s, "detail": d} for i, s, d in gaps],
+        "extra_candidate": [{"id": i, "why": w} for i, w in extra],
         "cells": results,
     }
     with open(os.path.join(a.out, "report.json"), "w", encoding="utf-8") as f:
@@ -746,6 +802,17 @@ def main() -> int:
     with open(os.path.join(a.out, "owed-gaps.txt"), "w") as f:
         for i, s, d in gaps:
             f.write(f"{i}\t{s}\t{d}\n")
+    with open(os.path.join(a.out, "extra-candidate.txt"), "w") as f:
+        for i, w in extra:
+            f.write(f"{i}\t{w}\n")
+    # THE CORPUS AND THE SELECTION, AS FILES, because replay.sh's owed-baseline check cannot tell
+    # "this id was dropped from cells.json" from "this run used --family and never looked at it"
+    # without them — and that is the exact case the ratchet's own header names first. Both are
+    # written on every run; a caller that ignores them is unchanged.
+    with open(os.path.join(a.out, "corpus-ids.txt"), "w") as f:
+        f.write("".join(cid + "\n" for cid in all_cell_ids))
+    with open(os.path.join(a.out, "selected-ids.txt"), "w") as f:
+        f.write("".join(c["id"] + "\n" for c in cells))
     with open(os.path.join(a.out, "diverging.txt"), "w") as f:
         for r in results:
             if r["classes"]:
@@ -773,6 +840,14 @@ def main() -> int:
         lines += ["", "## Golden gaps (not owed)", ""] + [f"- `{i}` {s}: {d}" for i, s, d in gaps[:50]]
         if len(gaps) > 50:
             lines.append(f"- … {len(gaps) - 50} more in owed-gaps.txt")
+    if extra:
+        lines += ["", "## Recorded by the candidate, compared by nothing (`extra.candidate`)", "",
+                  "Not divergences — these cells were never compared, because the golden does not owe "
+                  "them. Named here because silence about them is how a rename reads as a deletion and "
+                  "how a stale file from an earlier recording survives into a report.", ""] + \
+                 [f"- `{i}` {w}" for i, w in extra[:50]]
+        if len(extra) > 50:
+            lines.append(f"- … {len(extra) - 50} more in extra-candidate.txt")
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -792,6 +867,12 @@ def main() -> int:
             continue
         st = "FAIL" if r["classes"] else "PASS"
         sys.stdout.write(f"{r['id']}\t{st}\t{','.join(r['classes']) or 'identical'}\t{r['first_diff']}{narrow}\n")
+    # `extra.candidate` rides on the ledger like every other verdict. The ledger is what a human
+    # reads and what verdict.sh folds; a channel that exists only in report.json is a channel nobody
+    # sees (the same lesson `narrowed` above already cost).
+    for cid, why in extra:
+        st = "FAIL" if a.refuse_extra_candidate else "PASS"
+        sys.stdout.write(f"{cid}\t{st}\textra.candidate\t{why}\n")
     if a.strict:
         # The strict exit is for callers that use this file as a gate on a subset (land.sh); the full
         # verdict over every owed cell is still verdict.sh's. Zero owed cells is red: a filter that

@@ -11,9 +11,10 @@
 #   replay.sh --golden <dir> --candidate <dir> --out <dir> [--cells cells.json] [--family <regex>]
 #             [--accepted accepted-differences.json] [--allow-harness-skew]
 #             [--baseline owed-baseline.txt] [--accepted-gaps accepted-gaps.json] [--rebaseline]
-#             [--no-check-golden]
+#             [--no-check-golden] [--refuse-extra-candidate]
 #
-# <out>/  report.json report.md owed.txt owed-gaps.txt diverging.txt ledger.tsv
+# <out>/  report.json report.md owed.txt owed-gaps.txt diverging.txt extra-candidate.txt
+#         corpus-ids.txt selected-ids.txt ledger.tsv
 # Exit non-zero on any divergence, any owed cell missing, or zero rows. Exit 2 (before anything is
 # compared) if golden and candidate were not proven to come from the same harness revision — see
 # harness-rev.sh — unless --allow-harness-skew is given.
@@ -42,6 +43,7 @@ export BUSBAR_ORACLE_TOOL_DIR="${BUSBAR_ORACLE_TOOL_DIR:-$here}"
 
 GOLDEN="" CAND="" OUT="" CELLS="${data}/cells.json" FAMILY="" ACCEPTED="${data}/accepted-differences.json"
 ALLOW_SKEW=0 BASELINE="${data}/owed-baseline.txt" ACCEPTED_GAPS="${data}/accepted-gaps.json" REBASELINE=0 CHECK_GOLDEN=1
+REFUSE_EXTRA=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --golden) GOLDEN="$2"; shift 2 ;;
@@ -55,10 +57,11 @@ while [ $# -gt 0 ]; do
     --accepted-gaps) ACCEPTED_GAPS="$2"; shift 2 ;;
     --rebaseline) REBASELINE=1; shift ;;
     --no-check-golden) CHECK_GOLDEN=0; shift ;;
+    --refuse-extra-candidate) REFUSE_EXTRA=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -d "$GOLDEN" ] && [ -d "$CAND" ] && [ -n "$OUT" ] || { echo "usage: $0 --golden <dir> --candidate <dir> --out <dir> [--cells f] [--family re] [--accepted f] [--allow-harness-skew] [--baseline f] [--accepted-gaps f] [--rebaseline] [--no-check-golden]" >&2; exit 2; }
+[ -d "$GOLDEN" ] && [ -d "$CAND" ] && [ -n "$OUT" ] || { echo "usage: $0 --golden <dir> --candidate <dir> --out <dir> [--cells f] [--family re] [--accepted f] [--allow-harness-skew] [--baseline f] [--accepted-gaps f] [--rebaseline] [--no-check-golden] [--refuse-extra-candidate]" >&2; exit 2; }
 # absolute paths: verdict.sh runs from the repo root, so a relative --out would make it read an empty
 # ledger and (correctly) call the run vacuous
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; GOLDEN="$(cd "$GOLDEN" && pwd)"; CAND="$(cd "$CAND" && pwd)"
@@ -148,6 +151,7 @@ source "$(_fleet lib.sh)"
 diff_args=(--golden "$GOLDEN" --candidate "$CAND" --out "$OUT" --cells "$CELLS" --accepted "$ACCEPTED")
 [ -z "$FAMILY" ] || diff_args+=(--family "$FAMILY")
 [ "$ALLOW_SKEW" != 1 ] || diff_args+=(--allow-harness-skew)
+[ "$REFUSE_EXTRA" != 1 ] || diff_args+=(--refuse-extra-candidate)
 rows="$(python3 "${here}/diff-cells.py" "${diff_args[@]}")"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -156,9 +160,15 @@ if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 
+extra_ids=""
 while IFS=$'\t' read -r id status classes first; do
   [ -n "$id" ] || continue
   record "$id" "$status" "$classes" "$first" >/dev/null
+  # An `extra.candidate` row is about a cell NOTHING compared (see diff-cells.py). It is owed to the
+  # verdict all the same: a row nobody expects is a row verdict.sh's resolver never reads, so
+  # --refuse-extra-candidate would have written FAIL rows that decided nothing.
+  case "$classes" in extra.candidate) extra_ids="${extra_ids}${id}
+" ;; esac
 done <<<"$rows"
 
 # ── owed-baseline: the golden must not silently stop owing a cell it used to ─────────────────────
@@ -181,6 +191,11 @@ def read_ids(p):
 
 
 owed = set(read_ids(os.path.join(out, "owed.txt")))
+# The whole corpus, and the part of it THIS run selected — written by diff-cells.py on every run.
+# Without them "the golden no longer owes this id" and "this run never looked at this id" are the
+# same silence, which is the hole below.
+corpus = set(read_ids(os.path.join(out, "corpus-ids.txt")))
+selected = set(read_ids(os.path.join(out, "selected-ids.txt")))
 gap_reason = {}
 gpath = os.path.join(out, "owed-gaps.txt")
 if os.path.exists(gpath):
@@ -192,7 +207,36 @@ if os.path.exists(gpath):
 # "scope" is every id this run has an opinion about (owed now, or a named golden gap now). A
 # baseline id outside scope (e.g. this run used --family to cover only part of cells.json) is
 # neither confirmed nor regressed here — silently skipped, not a false alarm.
+#
+# THAT SKIP USED TO SWALLOW THE CASE THIS GUARD NAMES FIRST. `owed` and `gap_reason` are both
+# derived from cells.json, so a cell DELETED FROM cells.json is in neither — and `cid not in scope`
+# then dropped it, silently, which is the one outcome the header above says must never happen ("or
+# dropped from cells.json entirely"). The default reason string on the branch below was provably
+# unreachable. Reproduced against this very script: remove a PASSing, baselined cell from the
+# corpus and the run reports GREEN with no row, no stderr line and no mention of the loss anywhere.
+#
+# So the two silences are separated, using the corpus/selection files diff-cells.py writes:
+#   in the corpus but not selected  -> genuinely out of this run's scope (--family), skip
+#   NOT IN THE CORPUS AT ALL        -> the id left cells.json. RED, unless accepted-gaps names it.
+# An id RENAMED rather than removed is now visible from both ends: the old id is red here, and the
+# new one lands in the differ's `extra.candidate` channel instead of only being praised as "new
+# coverage" on stderr.
 scope = owed | set(gap_reason)
+
+
+def out_of_scope_reason(cid):
+    """Why this baselined id produced no verdict: a real gap in coverage, or a filtered run.
+    Returns None when the run legitimately has no opinion."""
+    # No corpus file (an older --out, a caller driving diff-cells.py by hand): fall back to the old
+    # behaviour rather than turning every baseline id red on a missing artifact.
+    if not corpus:
+        return None
+    if cid not in corpus:
+        return "no longer present in cells.json"
+    if cid not in selected:
+        return None                      # --family / --id-filter: not this run's question
+    return ("present in cells.json and selected by this run, but the run produced neither an owed "
+            "row nor a named gap for it")
 
 accepted = []
 if os.path.exists(gaps_path):
@@ -218,11 +262,14 @@ for cid in sorted(owed - set(baseline)):
     sys.stderr.write(f"owed-baseline: new coverage (not yet in the baseline): {cid}\n")
 
 for cid in baseline:
-    if cid not in scope:
-        continue
     if cid in owed:
         continue
-    reason = gap_reason.get(cid, "no longer present in cells.json")
+    if cid not in scope:
+        reason = out_of_scope_reason(cid)
+        if reason is None:
+            continue
+    else:
+        reason = gap_reason.get(cid, "no longer present in cells.json")
     e = find_accept(cid)
     if e:
         print(f"{cid}\tPASS\tACCEPTED named gap ({e['id']}, owner {e['owner']}): {e['rationale']}\t{reason}")
@@ -254,8 +301,9 @@ fi
 OWED="$(<"${OUT}/owed.txt")"
 echo
 echo "golden gaps (recorded SKIP/FAIL on the golden, not owed): $(wc -l <"${OUT}/owed-gaps.txt" | tr -d ' ')"
+echo "candidate cells nothing compared (extra.candidate, not red by default): $(wc -l <"${OUT}/extra-candidate.txt" | tr -d ' ')"
 GATE_NAME="shadow oracle vs golden" EXPECTED_IDS="${OWED}
-${baseline_ids}" LEDGER="$LEDGER" bash "$(_fleet verdict.sh)"
+${baseline_ids}${extra_ids}" LEDGER="$LEDGER" bash "$(_fleet verdict.sh)"
 rc=$?
 echo "report: ${OUT}/report.md"
 exit $rc

@@ -200,7 +200,10 @@ cp -R "$FIX" "$W/regress-cand"
 bash "${here}/replay.sh" --golden "$W/regress-golden" --candidate "$W/regress-cand" --out "$W/out-j" --cells "$CELLS" \
   --allow-harness-skew --no-check-golden --accepted "$W/no-accept.json" --baseline "$W/baseline-ab.txt" --accepted-gaps "$W/no-gaps.json" >"$W/out-j.log" 2>&1
 rc=$?
-row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-j/ledger.tsv")"
+# LAST ROW WINS, the same rule load_ledger() and verdict.sh apply to this file. The candidate still
+# carries the cell the golden stopped owing, so it also earns an `extra.candidate` row (the other
+# half of the same fact, written first); the baseline verdict is the one that decides.
+row="$(awk -F'\t' '$1=="self|a|ok"{r=$0} END{print r}' "$W/out-j/ledger.tsv")"
 status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
 [ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" == *"owed-baseline"* ]] && say PASS "golden dropped a baselined id, unnamed -> RED [owed-baseline regression]" || say FAIL "baseline regression rc=$rc status=$status_col title=$title_col"
 
@@ -211,7 +214,7 @@ JSON
 bash "${here}/replay.sh" --golden "$W/regress-golden" --candidate "$W/regress-cand" --out "$W/out-k" --cells "$CELLS" \
   --allow-harness-skew --no-check-golden --accepted "$W/no-accept.json" --baseline "$W/baseline-ab.txt" --accepted-gaps "$W/gaps-ab.json" >"$W/out-k.log" 2>&1
 rc=$?
-row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-k/ledger.tsv")"
+row="$(awk -F'\t' '$1=="self|a|ok"{r=$0} END{print r}' "$W/out-k/ledger.tsv")"
 status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
 [ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED named gap"* ]] && say PASS "same regression named in accepted-gaps.json -> GREEN, named-gap line" || say FAIL "accepted gap rc=$rc status=$status_col title=$title_col"
 
@@ -1535,6 +1538,71 @@ done
 [ -z "$seam_bad" ] \
   && say PASS "no shipped file resolves a PRODUCT data file against the tool's own directory" \
   || say FAIL "shipped file(s) resolve a product data file against the tool's own directory, which is only ever right in-tree:${seam_bad}"
+
+# (kk-1) A CELL THE CANDIDATE RECORDED AND NOTHING COMPARED. Every loop in diff-cells.py walks the
+# OWED set, which comes from the GOLDEN — so a cell file in the candidate that the golden does not
+# owe was invisible: no row, no class, no line. Two shapes, both real: an id cells.json HAS but the
+# golden could not record (a gap the candidate has closed), and an id cells.json does not have at
+# all (a rename, or a file left behind by an earlier recording into the same --out).
+cp -R "$FIX" "$W/extra"
+cp "$FIX/cells/self__a__ok.json" "$W/extra/cells/self__c__gap.json"
+cp "$FIX/cells/self__a__ok.json" "$W/extra/cells/self__zz__renamed.json"
+rc="$(run "$FIX" "$W/extra" "$W/out-kk1")"
+n_extra="$(wc -l <"$W/out-kk1/extra-candidate.txt" | tr -d ' ')"
+kk_rows="$(awk -F'\t' '$3=="extra.candidate"{n++} END{print n+0}' "$W/out-kk1/ledger.tsv")"
+kk_fail="$(fails_in "$W/out-kk1")"
+if [ "$rc" = 0 ] && [ "$n_extra" = 2 ] && [ "$kk_rows" = 2 ] && [ "$kk_fail" = 0 ] \
+   && grep -q 'self|c|gap' "$W/out-kk1/extra-candidate.txt" \
+   && grep -q 'self__zz__renamed' "$W/out-kk1/extra-candidate.txt"; then
+  say PASS "a cell the candidate recorded that the golden does not owe is reported as extra.candidate on its own row, and is not red"
+else
+  say FAIL "extra.candidate rc=$rc extras=$n_extra rows=$kk_rows fails=$kk_fail: $(cat "$W/out-kk1/extra-candidate.txt" | tr '\n' ' ' | cut -c1-200)"
+fi
+
+# (kk-2) …and RED when the caller asks for it. A row nobody expects is a row verdict.sh never reads,
+# so this also proves the ids reach EXPECTED_IDS rather than sitting in the ledger deciding nothing.
+rc="$(run_args "$FIX" "$W/extra" "$W/out-kk2" --allow-harness-skew --no-check-golden \
+        --accepted "$W/no-accept.json" --baseline "$W/no-baseline.txt" --refuse-extra-candidate)"
+kk2_fail="$(fails_in "$W/out-kk2")"
+[ "$rc" != 0 ] && [ "$kk2_fail" = 2 ] \
+  && say PASS "--refuse-extra-candidate turns those rows RED and the verdict sees them (2 FAIL)" \
+  || say FAIL "--refuse-extra-candidate rc=$rc fails=$kk2_fail (want non-zero, 2)"
+
+# (kk-3) THE CASE THE OWED-BASELINE RATCHET NAMES FIRST AND COULD NOT SEE: a baselined, PASSING cell
+# DELETED FROM cells.json. Its id leaves the owed set and the gaps list together, so the old
+# `if cid not in scope: continue` skipped it in silence and the run reported GREEN over a corpus one
+# cell smaller than the one signed off. Reproduced here against the real replay.sh.
+python3 - "$CELLS" "$W/cells-minus-a.json" <<'EOF'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d["cells"]=[c for c in d["cells"] if c["id"]!="self|a|ok"]
+json.dump(d,open(sys.argv[2],"w"))
+EOF
+printf 'self|a|ok\nself|b|stream\n' >"$W/baseline-kk.txt"
+cp -R "$FIX" "$W/kk3"
+rc="$(bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/kk3" --out "$W/out-kk3" \
+        --cells "$W/cells-minus-a.json" --allow-harness-skew --no-check-golden \
+        --accepted "$W/no-accept.json" --baseline "$W/baseline-kk.txt" \
+        --accepted-gaps "$W/no-gaps.json" >"$W/out-kk3.log" 2>&1; echo $?)"
+kk3_cls="$(awk -F'\t' '$1=="self|a|ok"{print $3}' "$W/out-kk3/ledger.tsv")"
+if [ "$rc" != 0 ] && [ "$(fails_in "$W/out-kk3")" = 1 ] && [ "$kk3_cls" = "owed-baseline regression" ] \
+   && grep -q 'no longer present in cells.json' "$W/out-kk3/ledger.tsv"; then
+  say PASS "a baselined cell DELETED from cells.json is an owed-baseline regression, not a silence"
+else
+  say FAIL "deleted-from-cells.json baseline id rc=$rc fails=$(fails_in "$W/out-kk3") class='$kk3_cls'"
+fi
+
+# (kk-4) …and a FILTERED run still says nothing about the ids it never looked at. The fix above must
+# not turn --family into a machine for false regressions: an id that is still in cells.json and
+# simply outside this run's selection is neither confirmed nor regressed.
+rc="$(bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/kk3" --out "$W/out-kk4" \
+        --cells "$CELLS" --family 'nomatch' --allow-harness-skew --no-check-golden \
+        --accepted "$W/no-accept.json" --baseline "$W/baseline-kk.txt" \
+        --accepted-gaps "$W/no-gaps.json" >"$W/out-kk4.log" 2>&1; echo $?)"
+kk4_baseline_rows="$(awk -F'\t' '$3=="owed-baseline regression"{n++} END{print n+0}' "$W/out-kk4/ledger.tsv")"
+[ "$kk4_baseline_rows" = 0 ] \
+  && say PASS "a --family run that selects none of the baselined ids reports no regression for them" \
+  || say FAIL "a filtered run invented ${kk4_baseline_rows} owed-baseline regression(s) for ids it never selected"
 
 echo
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }
