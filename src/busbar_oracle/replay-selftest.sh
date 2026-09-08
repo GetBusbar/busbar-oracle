@@ -885,6 +885,103 @@ grep -qi "not a string leaf" "$W/out-tt3.log" && msg_ok=1 || msg_ok=0
   && say PASS "description_corrections naming a pointer that is not a string leaf in the golden is refused at load" \
   || say FAIL "TT-3 non-string-leaf pointer was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-tt3.log)"
 
+# (uu) `new_route` — A ROUTE THAT DID NOT EXIST IN 1.5.5 NOW ANSWERING IS NOT A SUPERSET OF
+# ANYTHING. Golden 404 with the 1.5.5 not-found envelope, candidate not 5xx: `status`, `headers`
+# and `body` may ALL be taken at once, wholesale, with no relation checked between the stub and the
+# real response. Any other golden status leaves the flag inert — the ordinary additive rules decide
+# exactly as if `new_route` had never been declared.
+uu_cells() {  # <out> — self|a|ok reclassified onto a BODY_IS_CONTRACT family, like admin.ops
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = "admin.ops"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+uu_cells "$W/uu-cells.json"
+cat >"$W/uu-accept.json" <<'JSON'
+{"accepted":[{"id":"UU-1 new route","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["status","headers","body"],"changelog":"selftest: a new route was added","rationale":"selftest: new_route proof","new_route":true}]}
+JSON
+cp -R "$FIX" "$W/uu-golden"
+python3 - "$W/uu-golden/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["status"] = 404
+d["body"] = {"json": {"error": {"code": "not_found", "message": "route not found"}}}
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+
+# (uu1) golden 404 (the 1.5.5 stub) -> candidate 200 with a real body -> ACCEPTED, naming the
+# entry and the status transition.
+cp -R "$FIX" "$W/uu1-c"
+python3 - "$W/uu1-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["status"] = 200
+d["body"] = {"json": {"id": "new-thing", "value": 42}}
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$W/uu-golden" --candidate "$W/uu1-c" --out "$W/out-uu1" --cells "$W/uu-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/uu-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-uu1.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-uu1/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$title_col" == *"UU-1"* ]] \
+  && [[ "$diff_col" == *"new route: golden 404 -> candidate 200"* ]] \
+  && say PASS "new_route accepts a stub-404 golden answered for real by the candidate, naming the entry" \
+  || say FAIL "UU-1 new-route acceptance failed: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
+
+# (uu2) golden 404 (the stub) -> candidate 503 -> still RED. A 5xx is not "now answers"; it is a
+# route that still does not work, just differently.
+cp -R "$FIX" "$W/uu2-c"
+python3 - "$W/uu2-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["status"] = 503
+d["body"] = {"json": {"error": {"code": "unavailable", "message": "try again later"}}}
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$W/uu-golden" --candidate "$W/uu2-c" --out "$W/out-uu2" --cells "$W/uu-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/uu-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-uu2.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-uu2/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" != *"ACCEPTED"* ]] \
+  && say PASS "new_route refuses a candidate 5xx -- still RED" \
+  || say FAIL "UU-2 candidate-5xx was not red: rc=$rc status=$status_col title=$title_col"
+
+# (uu3) golden status is NOT 404 -> the flag is INERT and the ordinary superset rule decides (here:
+# a genuine body-growth pass, on the unmodified fixture golden/candidate pair).
+cp -R "$FIX" "$W/uu3-c"
+python3 - "$W/uu3-c/cells/self__a__ok.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["json"]["extra"] = True
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/uu3-c" --out "$W/out-uu3" --cells "$W/uu-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/uu-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-uu3.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|a|ok"{print; exit}' "$W/out-uu3/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"; diff_col="$(cut -f4 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$diff_col" != *"new route"* ]] \
+  && say PASS "new_route is ignored when the golden status is not 404 -- the ordinary superset rule decides" \
+  || say FAIL "UU-3 non-404-golden did not fall back to ordinary rules: rc=$rc status=$status_col title=$title_col diff='$diff_col'"
+
+# (uu4) `new_route: true` with no `changelog` line -> refused at LOAD, same as any other money class.
+cat >"$W/uu4-accept.json" <<'JSON'
+{"accepted":[{"id":"UU-4 no changelog","kind":"additive","by":"selftest","cells":"^self\\|a\\|ok$","expected_cells":1,"classes":["status"],"rationale":"y","new_route":true}]}
+JSON
+bash "${here}/replay.sh" --golden "$W/uu-golden" --candidate "$W/uu-golden" --out "$W/out-uu4" --cells "$W/uu-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/uu4-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-uu4.log" 2>&1
+rc=$?
+grep -qi "kind=breaking\|new_route" "$W/out-uu4.log" && msg_ok=1 || msg_ok=0
+[ "$rc" != 0 ] && [ "$msg_ok" = 1 ] \
+  && say PASS "new_route without a changelog line is refused at load" \
+  || say FAIL "UU-4 new_route-no-changelog was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-uu4.log)"
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
