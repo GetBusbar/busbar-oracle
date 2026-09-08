@@ -133,6 +133,102 @@ def money_at_cell(fam: str) -> set:
     where it also holds `body`."""
     return {k for k in CLASS_ORDER if rated_weight(fam, k) == 10}
 
+
+# ── `additive` — A THIRD REGISTER KIND, FOR GROWTH THE TOOL CAN VERIFY IS GROWTH ──────────────────
+# `improvement` may never take a class `money_at_cell()` rates 10 for the cell's family (the boot-
+# refusal-stdout hole this file was written against); `breaking` may take anything, but only by
+# declaring the change and eating the blast radius. Neither fits a body that grew a KEY: F-011's
+# admin.ops views (`GetHooks`, `PostHooks`, `GetOpenapiJson`, ...) are BODY_IS_CONTRACT — `body` is
+# rated 10 there — so `improvement` cannot cover them, and `breaking` would be a lie: nothing broke,
+# a value that existed is still there with the SAME value, and only new keys were added beside it.
+#
+# `additive` is authorized to take `body` and `headers` ONLY where the tool itself has PROVEN the
+# candidate is a superset of the golden at every path the golden defines — never on the strength of
+# an owner's say-so alone, which is what `classes: [body, headers]` on an `improvement`/`breaking`
+# entry would otherwise be. See `additive_superset()`/`additive_headers_superset()` below for the
+# proof, and the fired-additive branch in `main()` for where a failed proof leaves the cell red
+# rather than silently falling back to an ordinary acceptance.
+ADDITIVE_CLASSES = {"body", "headers"}
+
+
+def body_as_json(body) -> tuple:
+    """(parsed, ok). `ok` is True only when `body` is JSON — already-structured (`body["json"]`) or
+    text that parses (`body["text"]` via `json.loads`). An SSE/plain-text body, or one side that
+    fails to parse, makes `ok` False: additive body forgiveness is JSON-superset ONLY, by the spec's
+    own words ("if either side is not JSON, no body forgiveness") — there is no text-superset
+    relation to fall back to."""
+    if not isinstance(body, dict):
+        return None, False
+    if "json" in body:
+        return body["json"], True
+    text = body.get("text")
+    if isinstance(text, str):
+        try:
+            return json.loads(text), True
+        except (ValueError, TypeError):
+            return None, False
+    return None, False
+
+
+def additive_superset(golden, cand, path: str, null_to_value: set) -> str | None:
+    """The first JSON-pointer path where `cand` is NOT a superset of `golden`, or None if it is one
+    everywhere. The relation, applied recursively:
+
+      dict     every golden key present in cand with an equal (recursively-superset) value; cand
+               may carry extra keys the golden does not name.
+      list     cand is at least as long as golden, and golden is a PREFIX of cand under this same
+               relation applied per element (golden == cand — same length, every element equal — is
+               the length-equal case of the same rule, not a separate one). Extra trailing elements
+               are additive growth; an element INSERTED before the end, or one reordered, moves
+               every following golden element's paired candidate index and fails the recursive
+               check at the first element that no longer matches, which is the right answer for
+               "was every original array member kept, in place, with everything after it new".
+      scalar   equal values, UNLESS golden is None and cand is not: a null growing into a real value
+               is not free — it names a path the register did not always populate, and the entry
+               must list it under `null_to_value` to claim it (never a blanket default, or `null`
+               would stop being a signal that the field is genuinely absent).
+    """
+    if golden is None and cand is not None:
+        return None if path in null_to_value else (path or "/")
+    if isinstance(golden, dict):
+        if not isinstance(cand, dict):
+            return path or "/"
+        for k, gv in golden.items():
+            if k not in cand:
+                return f"{path}/{k}"
+            bad = additive_superset(gv, cand[k], f"{path}/{k}", null_to_value)
+            if bad is not None:
+                return bad
+        return None
+    if isinstance(golden, list):
+        if not isinstance(cand, list) or len(cand) < len(golden):
+            return path or "/"
+        for i, gv in enumerate(golden):
+            bad = additive_superset(gv, cand[i], f"{path}/{i}", null_to_value)
+            if bad is not None:
+                return bad
+        return None
+    if golden != cand:
+        return path or "/"
+    return None
+
+
+def additive_headers_superset(gh: dict, ch: dict, body_ok: bool) -> str | None:
+    """The first header name where `ch` is NOT a superset of `gh`, or None if it is one everywhere.
+    Every golden header must be present in the candidate with an EQUAL value; extra candidate
+    headers are additive growth, same as an extra JSON key. `content-length` is exempted only when
+    `body_ok` — this SAME entry's body check already proved the candidate a superset there, so the
+    length moving is that growth's own shadow, not a second, unrelated divergence; if this entry
+    does not also cover `body` (or the body check failed), `content-length` is held to the ordinary
+    equality rule like any other header."""
+    gh2, ch2 = dict(gh or {}), dict(ch or {})
+    if body_ok:
+        gh2.pop("content-length", None); ch2.pop("content-length", None)
+    for k, v in gh2.items():
+        if k not in ch2 or ch2[k] != v:
+            return k
+    return None
+
 # ── THE ONE EXEMPTION FROM `norm.rules`, AND THE ONLY KIND OF RULE ALLOWED INTO IT ───────────────
 # `norm.rules` exists because a normalizer rule that fires on ONE side is itself a finding: content
 # was rewritten on the candidate that was not rewritten on the golden, and the rewrite is exactly
@@ -309,6 +405,8 @@ def allowed_classes(kind: str, classes: set) -> set:
         return set(classes)
     if kind == "breaking":
         return set(CLASS_ORDER) - {"missing.golden"}
+    if kind == "additive":
+        return set(ADDITIVE_CLASSES)
     return set(CLASS_ORDER) - MONEY_CLASSES - {"missing.golden"}
 
 
@@ -516,6 +614,8 @@ def first_diff_text(classes, detail) -> str:
     d = detail.get(k)
     if d is None and detail.get("accepted.transform"):
         return f"{k}: identical after the accepted rewrite {detail['accepted.transform']}"
+    if k in ("body", "headers") and detail.get("additive.rejected"):
+        return detail["additive.rejected"]
     if k == "status":
         return f"status {d['golden']} -> {d['candidate']}"
     if k == "headers":
@@ -622,7 +722,7 @@ def main() -> int:
     all_cell_ids = [c["id"] for c in cells_doc["cells"]]
     check_compare_policy(cells_doc["cells"], a.cells)
 
-    accepted, transforms = [], []
+    accepted, transforms, additive = [], [], []
     if os.path.exists(a.accepted):
         for e in json.load(open(a.accepted, encoding="utf-8")).get("accepted", []):
             base = {"rx": re.compile(e.get("cells", ".")), "classes": set(e.get("classes", [])), "kind": e.get("kind", "improvement"),
@@ -643,6 +743,27 @@ def main() -> int:
             money = base["allowed"] & MONEY_CLASSES
             if money and not (base["kind"] == "breaking" and e.get("changelog")):
                 sys.exit(f"accepted-differences: entry {base['id']!r} accepts {sorted(money)} but is not kind=breaking with a changelog line")
+            # `additive` IS NEVER A BLANK CHEQUE FOR MONEY, `breaking`'S CHANGELOG LINE DOES NOT
+            # EXTEND TO IT. It is defined for exactly two classes — `body` and `headers` — and ONLY
+            # when the tool itself proves the candidate a superset of the golden at every path the
+            # golden names (see additive_superset()); status, usage, readback and every missing.*
+            # class are refused here regardless of `classes`, because there is no superset relation
+            # for "the request succeeded" or "the money moved" — those are equal or they are not.
+            if base["kind"] == "additive":
+                if "transform" in e:
+                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive and also carries a "
+                             f"`transform` — additive proves growth by inspecting the recorded pair, never by "
+                             f"rewriting it first. Use one register kind or the other.")
+                extra = base["allowed"] - ADDITIVE_CLASSES
+                if extra:
+                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive but names {sorted(extra)} — "
+                             f"additive may only ever take {sorted(ADDITIVE_CLASSES)}. There is no superset relation "
+                             f"for a status code, a usage figure, a readback or a missing cell: those are either "
+                             f"equal or they are a real divergence.")
+                if not e.get("changelog"):
+                    sys.exit(f"accepted-differences: entry {base['id']!r} is kind=additive but carries no `changelog` "
+                             f"line — additive proves growth mechanically, but the growth itself is still a product "
+                             f"change an owner must document, exactly as `breaking` requires.")
             if "cells" not in e and not base["classes"] and "transform" not in e:
                 sys.exit(f"accepted-differences: entry {base['id']!r} has neither cells nor classes (a total blanket)")
             # A TRANSFORM IS NOT EXEMPT FROM HAVING A SCOPE. `cells` defaulted to "." for every entry,
@@ -706,6 +827,13 @@ def main() -> int:
                                  f"enough to swallow arbitrary content.")
                 base["transform"] = [(re.compile(rx, re.M), repl) for rx, repl in e["transform"]["candidate"]]
                 transforms.append(base)
+            elif base["kind"] == "additive":
+                # JSON-pointer-style paths (`/pools/0/name`) where a golden `null` is allowed to grow
+                # into a real value. Not a default: `null` staying `null` is a claim the field is
+                # genuinely absent, and letting it grow ANYWHERE for free would let additive quietly
+                # cover a value that was never populated instead of one that is provably unchanged.
+                base["null_to_value"] = set(e.get("null_to_value", []))
+                additive.append(base)
             else:
                 accepted.append(base)
     # ── WHICH ENTRIES CAN NO LONGER FORGIVE WHAT THEY NAME ──────────────────────────────────────
@@ -900,6 +1028,42 @@ def main() -> int:
                 cover.append(e); need -= take
                 if not need:
                     break
+            # `additive` CLAIMS A CLASS BY PROVING IT, NEVER BY DECLARING IT. Unlike every other
+            # entry above, matching this cell is not enough: `body`/`headers` only leave `need` when
+            # additive_superset()/additive_headers_superset() find the candidate a superset of the
+            # golden at every path the golden defines. A failed proof leaves the class in `need` (the
+            # cell stays red) and records WHERE it failed, so the row never has to guess whether
+            # "additive" fired or simply matched.
+            additive_note = None
+            if need & ADDITIVE_CLASSES:
+                for e in additive:
+                    if not e["rx"].search(cid):
+                        continue
+                    want = need & e["allowed"]
+                    if not want:
+                        continue
+                    claimed, body_ok = set(), False
+                    if "body" in want:
+                        gj, gok = body_as_json(g.get("body"))
+                        cj, cok = body_as_json(cc.get("body"))
+                        if gok and cok:
+                            bad = additive_superset(gj, cj, "", e["null_to_value"])
+                            if bad is None:
+                                claimed.add("body"); body_ok = True
+                            else:
+                                additive_note = f"additive: not a superset at {bad}"
+                        else:
+                            additive_note = "additive: body is not JSON on both sides"
+                    if "headers" in want:
+                        bad = additive_headers_superset(g.get("headers", {}), cc.get("headers", {}), body_ok)
+                        if bad is None:
+                            claimed.add("headers")
+                        else:
+                            additive_note = f"additive: not a superset at header {bad!r}"
+                    if claimed:
+                        cover.append(e); need -= claimed
+                    if not need:
+                        break
             if cover and not need:
                 acc = cover[0] if len(cover) == 1 else {
                     "id": " + ".join(e["id"] for e in cover),
@@ -907,6 +1071,12 @@ def main() -> int:
                     "rationale": " | ".join(e["rationale"] for e in cover),
                     "by": ", ".join(dict.fromkeys(e["by"] for e in cover)),
                 }
+            elif additive_note:
+                # THE CELL STAYS RED, BUT NOT SILENTLY: an additive entry matched and was tried, and
+                # this is exactly where it stopped being a superset. Attached rather than replacing
+                # `detail[k]` so the real diff (the golden/candidate values at the failing path) is
+                # still there for whoever opens report.json; only the ROW's headline message changes.
+                detail = {**detail, "additive.rejected": additive_note}
         # ONE AUTHORITY FOR WHAT A DIVERGENCE IS WORTH. This was three expressions that had to agree
         # with MONEY_CLASSES by hand and did not; rated_weight() is now the only place that knows.
         rated = max([rated_weight(fam, k) for k in classes] or [0])
