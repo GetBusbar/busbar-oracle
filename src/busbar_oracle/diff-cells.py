@@ -102,6 +102,36 @@ assert {k for k, w in CLASS_WEIGHT.items() if w == 10} == MONEY_CLASSES | {"miss
     "MONEY_CLASSES must name every class CLASS_WEIGHT rates 10 (missing.golden is a recorder bug, never acceptable at all)"
 # Families where BODY bytes are the contract itself (admin responses, boot messages, CLI output).
 BODY_IS_CONTRACT = {"admin.ops", "boot.refusal", "boot.warning", "config.migrate", "cli", "ops.scrape"}
+# On those families these classes are rated 10 whatever CLASS_WEIGHT says, because on a boot refusal
+# or a CLI verb the bytes ARE the product's answer.
+BODY_CONTRACT_TEN = ("status", "body", "missing.candidate", "missing.golden")
+
+
+def rated_weight(fam: str, k: str) -> int:
+    """What this cell's divergence in class `k` is actually WORTH — the number the report uses.
+
+    THE MONEY GUARD AND THE WEIGHT USED TO ANSWER TO DIFFERENT AUTHORITIES, which is the whole of
+    this finding. `MONEY_CLASSES` is keyed on the CLASS and the assertion above holds it to
+    `CLASS_WEIGHT`; but the weight a cell's divergence is scored with is keyed on the FAMILY, and on
+    the 604 cells of BODY_IS_CONTRACT the `body` class is rated 10 while CLASS_WEIGHT rates it 3 and
+    MONEY_CLASSES does not name it at all. The assertion passed because it never looked at the
+    family path. So a four-line `improvement` entry — no `kind: breaking`, no changelog line the
+    loader demands — could forgive the ENTIRE stdout and stderr of a boot refusal: a cell whose only
+    content is the refusal text an operator reads, weighted 10 in the D/W ratio and waived by an
+    entry the money guard never inspected.
+
+    One function now answers both questions, so they cannot disagree again: `money_at_cell()` asks
+    it which classes are money HERE, and the scoring below asks it what the divergence is worth."""
+    if fam in BODY_IS_CONTRACT and k in BODY_CONTRACT_TEN:
+        return 10
+    return CLASS_WEIGHT[k]
+
+
+def money_at_cell(fam: str) -> set:
+    """The classes no `improvement` entry may forgive ON A CELL OF THIS FAMILY: every class this
+    file rates 10 for it. Equal to MONEY_CLASSES everywhere except the BODY_IS_CONTRACT families,
+    where it also holds `body`."""
+    return {k for k in CLASS_ORDER if rated_weight(fam, k) == 10}
 
 # ── THE ONE EXEMPTION FROM `norm.rules`, AND THE ONLY KIND OF RULE ALLOWED INTO IT ───────────────
 # `norm.rules` exists because a normalizer rule that fires on ONE side is itself a finding: content
@@ -212,6 +242,20 @@ def provenance_revs(m: dict) -> set:
         if isinstance(part, dict):
             add(part.get("harness_rev"))
     return revs
+
+
+def entry_may_take(e: dict, money_here: set) -> set:
+    """The classes this register entry may forgive ON THIS CELL.
+
+    `e["allowed"]` is what the entry says (checked once, at load, against MONEY_CLASSES). This is
+    the same question asked where the answer can depend on the cell: a class that is rated 10 for
+    this cell's family is money HERE, and only a `breaking` entry with a changelog line may take it,
+    exactly as the loader's guard demands for the class-keyed money set. An entry that is not so
+    entitled simply does not cover the class — the class stays in `need`, the cell stays red, and
+    the row names the divergence instead of an acceptance."""
+    if e["money_ok"]:
+        return e["allowed"]
+    return e["allowed"] - money_here
 
 
 def allowed_classes(kind: str, classes: set) -> set:
@@ -558,6 +602,10 @@ def main() -> int:
             # empty literal let a `breaking` entry with no `classes` and no changelog take every money
             # class there is. See allowed_classes().
             base["allowed"] = allowed_classes(base["kind"], base["classes"])
+            # Whether this entry is entitled to forgive a MONEY class at all — the same test the
+            # loader applies below, kept on the entry so the per-cell matcher can apply it against
+            # the classes THIS cell rates 10 (see rated_weight/money_at_cell).
+            base["money_ok"] = base["kind"] == "breaking" and bool(e.get("changelog"))
             if "missing.golden" in base["classes"]:
                 sys.exit(f"accepted-differences: entry {base['id']!r} accepts 'missing.golden' — a golden ledger row that says PASS for a cell the golden did not write is a recorder bug, never an acceptable difference; re-record the golden")
             money = base["allowed"] & MONEY_CLASSES
@@ -621,6 +669,30 @@ def main() -> int:
                 transforms.append(base)
             else:
                 accepted.append(base)
+    # ── WHICH ENTRIES CAN NO LONGER FORGIVE WHAT THEY NAME ──────────────────────────────────────
+    # Said at LOAD, over the whole corpus, so the register's owners learn it from a run rather than
+    # from a cell going red months later. Not fatal: nothing has diverged yet, and refusing to run
+    # would make the differ unusable against a register that is merely stale. The refusal itself
+    # happens per cell, where the question is real (see entry_may_take).
+    fam_by_id = {c["id"]: (c.get("family") or c.get("plane", "unknown")) for c in cells_doc["cells"]}
+    narrowed_entries = []
+    for e in accepted + transforms:
+        if e["money_ok"]:
+            continue
+        lost = set()
+        for cid, fam in fam_by_id.items():
+            if e["rx"].search(cid):
+                lost |= (e["allowed"] & money_at_cell(fam)) - MONEY_CLASSES
+        if lost:
+            narrowed_entries.append((e["id"], sorted(lost)))
+    if narrowed_entries:
+        sys.stderr.write(
+            "accepted-differences: the following entries name class(es) that are rated 10 on some "
+            "cell they match (a family where the BODY is the contract), and are not kind=breaking "
+            "with a changelog line. Those classes are NOT forgiven on those cells:\n")
+        for eid, lost in narrowed_entries:
+            sys.stderr.write(f"  - {eid!r}: {', '.join(lost)}\n")
+
     os.makedirs(a.out, exist_ok=True)
 
     fam_rx = re.compile(a.family) if a.family else None
@@ -702,7 +774,11 @@ def main() -> int:
                     # Now it does, jointly across the entries that fired (same rule as the non-
                     # transform matcher below): anything left over stays a divergence and is red.
                     if not classes and classes_raw:
-                        cover_t = set().union(*(t["allowed"] for t in fired))
+                        # …and the SAME per-cell money test the ordinary matcher applies. A fired
+                        # transform hands the cell's raw class list to the accepted column, so an
+                        # `improvement` transform on a boot-refusal cell could otherwise carry
+                        # `body` — rated 10 there — on the strength of having rewritten some text.
+                        cover_t = set().union(*(entry_may_take(t, money_at_cell(fam)) for t in fired))
                         unclaimed = [k for k in classes_raw if k not in cover_t]
                         if not unclaimed:
                             classes, detail = classes_raw, {"accepted.transform": [t["id"] for t in fired]}
@@ -734,10 +810,11 @@ def main() -> int:
             # money class can only ever be taken by a `breaking` entry that names its changelog line).
             # The row then reports every entry that contributed, never just the first.
             need, cover = set(classes), []
+            money_here = money_at_cell(fam)
             for e in accepted:
                 if not e["rx"].search(cid):
                     continue
-                take = need & e["allowed"]
+                take = need & entry_may_take(e, money_here)
                 if not take:
                     continue
                 cover.append(e); need -= take
@@ -750,13 +827,24 @@ def main() -> int:
                     "rationale": " | ".join(e["rationale"] for e in cover),
                     "by": ", ".join(dict.fromkeys(e["by"] for e in cover)),
                 }
+        # ONE AUTHORITY FOR WHAT A DIVERGENCE IS WORTH. This was three expressions that had to agree
+        # with MONEY_CLASSES by hand and did not; rated_weight() is now the only place that knows.
+        rated = max([rated_weight(fam, k) for k in classes] or [0])
         wt = c.get("weight")
         if wt is None:
-            wt = 10 if fam in BODY_IS_CONTRACT else max([CLASS_WEIGHT[k] for k in classes] or [0])
-            if fam in BODY_IS_CONTRACT and classes:
-                wt = max(10 if k in ("status", "body", "missing.candidate", "missing.golden") else CLASS_WEIGHT[k] for k in classes)
-        cell_w = max([CLASS_WEIGHT[k] for k in classes] or [0]) if not classes else max(wt, 1)
-        owed_w = c.get("weight") or (10 if fam in BODY_IS_CONTRACT else 10)
+            wt = rated if classes else (10 if fam in BODY_IS_CONTRACT else 0)
+        # A DECLARED WEIGHT MAY NOT UNDERCUT A MONEY CLASS. `cell_w` took the cell's own `weight` in
+        # preference to its classes', so `"weight": 1` on a cell would have capped a weight-10
+        # `status` divergence's contribution to the D/W ratio at 1 — a money divergence priced as a
+        # cosmetic one. Dormant in busbar's corpus (all 22 cells that declare a weight declare 10),
+        # but nothing refused a low weight on a money class, so the floor is the rating.
+        cell_w = max(wt, rated, 1) if classes else 0
+        # `or` made a declared `"weight": 0` silently become 10, and both arms of the old
+        # conditional were 10 — so the D/W "ratio" was a cell count. Kept at 10 (every owed cell
+        # weighs the same today), said once, with a declared weight honoured only when it is a
+        # usable positive integer.
+        decl = c.get("weight")
+        owed_w = decl if isinstance(decl, int) and not isinstance(decl, bool) and decl > 0 else 10
         W += owed_w
         fam_stats[fam]["owed"] += 1
         fam_stats[fam]["owed_w"] += owed_w

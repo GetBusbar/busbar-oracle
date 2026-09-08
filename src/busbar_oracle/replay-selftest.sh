@@ -1764,5 +1764,74 @@ grep -q 'rm -f "\$OUT/cells/\$safe.json"' <<<"$nn_src" || nn_bad="${nn_bad} a pr
   && say PASS "record.sh captures the driver's exit status, asks script_cell_verdict for the verdict, and gives every selected cell a fresh raw dir and no stale cell file" \
   || say FAIL "record.sh's script path:${nn_bad}"
 
+# (oo) AN `improvement` MAY NOT FORGIVE A CLASS THE DIFFER ITSELF RATES 10. MONEY_CLASSES is keyed
+# on the CLASS; the weight a divergence is scored with is keyed on the FAMILY. On the six
+# BODY_IS_CONTRACT families (admin.ops, boot.refusal, boot.warning, config.migrate, cli, ops.scrape
+# — 604 cells of busbar's corpus) `body` is rated 10 while CLASS_WEIGHT rates it 3 and
+# MONEY_CLASSES does not name it, so a four-line `improvement` entry with no changelog line could
+# waive the entire stdout of a boot refusal — the only thing such a cell records, weighted 10 in the
+# D/W ratio, forgiven by an entry the money guard never inspected. The file's own assertion could
+# not catch it because it never looks at the family path.
+oo_cells() {  # <out> <family>
+  python3 - "$CELLS" "$1" "$2" <<'EOF'
+import json,sys
+d=json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|a|ok":
+        c["family"] = sys.argv[3]
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+oo_reg() {  # <out> <kind> <changelog-or-empty>
+  python3 - "$1" "$2" "$3" <<'EOF'
+import json,sys
+e = {"id": "OO-1 body wording", "cells": r"^self\|a\|ok$", "classes": ["body"],
+     "kind": sys.argv[2], "expected_cells": 1, "owner": "selftest",
+     "rationale": "selftest: a body-only acceptance"}
+if sys.argv[3]:
+    e["changelog"] = sys.argv[3]
+json.dump({"accepted": [e]}, open(sys.argv[1], "w"))
+EOF
+}
+cp -R "$FIX" "$W/oo-c"
+python3 - "$W/oo-c/cells/self__a__ok.json" <<'EOF'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d["body"]["json"]["ok"] = "refused: BOOT-141, the download could not be verified"
+json.dump(d, open(p, "w"), separators=(",",":"), sort_keys=True)
+EOF
+oo_run() {  # <cells.json> <register> <out> -> ledger class column for self|a|ok
+  bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/oo-c" --out "$3" --cells "$1" \
+    --allow-harness-skew --no-check-golden --accepted "$2" --baseline "$W/no-baseline.txt" \
+    >"$3.log" 2>&1
+  awk -F'\t' '$1=="self|a|ok"{r=$2"/"$3} END{print r}' "$3/ledger.tsv"
+}
+oo_cells "$W/oo-cells-refusal.json" "boot.refusal"
+oo_cells "$W/oo-cells-plain.json"   "self"
+oo_reg "$W/oo-reg-improvement.json" improvement ""
+oo_reg "$W/oo-reg-breaking.json"    breaking    "Boot refusals name the artifact they could not verify."
+
+oo_a="$(oo_run "$W/oo-cells-refusal.json" "$W/oo-reg-improvement.json" "$W/out-oo-a")"
+oo_b="$(oo_run "$W/oo-cells-plain.json"   "$W/oo-reg-improvement.json" "$W/out-oo-b")"
+oo_c="$(oo_run "$W/oo-cells-refusal.json" "$W/oo-reg-breaking.json"    "$W/out-oo-c")"
+
+case "$oo_a" in
+  FAIL/body) say PASS "an improvement may not forgive \`body\` on a family where the body IS the contract (rated 10) — the cell stays RED" ;;
+  *) say FAIL "a body-10 boot.refusal cell was forgiven by an improvement entry: row='${oo_a}'" ;;
+esac
+case "$oo_b" in
+  "PASS/ACCEPTED improvement (OO-1 body wording): body") say PASS "…and the same entry still forgives \`body\` on a family the differ rates it 3 (the rule is the RATING, not a ban on the class)" ;;
+  *) say FAIL "a body-3 cell was not forgiven by an improvement entry naming body: row='${oo_b}'" ;;
+esac
+case "$oo_c" in
+  "PASS/ACCEPTED breaking (OO-1 body wording): body") say PASS "…and a \`breaking\` entry with a changelog line forgives it, exactly as it may for every other money class" ;;
+  *) say FAIL "a breaking+changelog entry could not forgive a body-10 cell: row='${oo_c}'" ;;
+esac
+# and the register's owners are told at LOAD which entries just lost reach, rather than finding out
+# when a cell goes red months later
+grep -q "OO-1 body wording" "$W/out-oo-a.log" \
+  && say PASS "the entry that lost reach is named on stderr when the register loads" \
+  || say FAIL "no entry was named when the register loaded, so the narrowing is silent"
+
 echo
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN" || { echo "replay selftest: RED ($fails)"; exit 1; }
