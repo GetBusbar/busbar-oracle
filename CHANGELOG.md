@@ -4,6 +4,25 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.4
+
+- **`additive` gains `text_list_growth: true`, the same superset proof for a key-list named in
+  prose instead of JSON.** A body/`effects.stderr` string can grow an enum inside a sentence
+  ("expected `groups`, `hooks`, `root`, or `plugin_versions`") the same way a JSON array grows a
+  key — but there is no JSON structure to walk, and the surrounding template is exactly the part
+  that must not move for free. The check finds every backtick-quoted comma list in the golden and
+  candidate text (paired by order; a mismatched count, or growth touching more than one list, is
+  refused — one declared list per entry keeps the check narrow); the one list that changed must
+  hold golden's items as a PREFIX; every other list and everything outside the lists must be
+  byte-identical; and the actual proof is a splice — golden's own raw list text spliced back into
+  the candidate at the changed list's position must reproduce golden byte for byte. That splice is
+  what catches a reworded template beside real growth: `admin.ops|DeleteOverlaySection|not-found`
+  changed "expected" to "expected one of" alongside adding four items, and the splice fails at the
+  first byte the wording differs, so the cell stays red. `effects.stderr` is now a valid `additive`
+  class, but refused at load unless `text_list_growth: true` is also set — a raw string has no
+  other growth proof this file knows. Accepted rows report the items proved new via
+  `detail["additive.removed"]`.
+
 ## 0.3.3
 
 - **A third register kind, `additive`, for growth the tool proves rather than an owner asserts.**
