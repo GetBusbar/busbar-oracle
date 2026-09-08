@@ -4,6 +4,20 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.6
+
+- **`additive` gains `description_corrections`, for a named JSON string leaf that may differ
+  outright.** Not every body difference is growth — sometimes 1.5.5's prose was simply wrong, and
+  1.6.0's replacement is a registered factual correction rather than an addition.
+  `description_corrections: ["<json pointer>", ...]` forgives a STRING leaf's mismatch at exactly
+  the listed pointer(s), no growth relation checked, reported on the accepted row with both texts;
+  every other leaf still follows the ordinary superset rules unchanged, and an entry may correct
+  one leaf while separately proving `text_list_growth` on a different leaf in the same body (a
+  corrected leaf never competes for `text_list_growth`'s one-differing-leaf slot — checked first).
+  Refused at load: a pointer that does not resolve to a string in the golden body of any cell the
+  entry matches — a typo'd path would otherwise silently forgive nothing while the cell stays red
+  for an unrelated-looking reason.
+
 ## 0.3.5
 
 - **`text_list_growth` reaches a string LEAF inside a JSON body, not only a plain-text body.**
