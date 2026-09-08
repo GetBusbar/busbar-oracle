@@ -371,6 +371,117 @@ status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
   && say PASS "a transform never turns a genuine divergence into a pass -> still RED [body] under an otherwise-forgiving entry" \
   || say FAIL "a planted body diff under a transform-bearing entry was NOT red: rc=$rc status=$status_col title=$title_col"
 
+# (pp) A FIRED TRANSFORM MAY TAKE A CLASS IT RENDERED IDENTICAL, WHATEVER THAT CLASS IS RATED ON
+# THIS CELL'S FAMILY. The fired-transform branch only runs when compare(g_t, cc_t) found NOTHING
+# left to compare — the declared rewrite accounts for the WHOLE of what classes_raw differed in,
+# because a transform only ever touches `effects.stderr` and `body.text` (plus the content-length
+# shadow of the latter): every other field of g_t/cc_t is a verbatim copy of g/cc, so a class outside
+# {headers, body, effects.stderr} that had moved would still show up in `classes` and this branch
+# would never run. Subtracting the FAMILY-rated money set on top of the entry's own `allowed` (as
+# v0.3.1 did) refused an `improvement` D-1-shaped transform credit for `body` on every
+# BODY_IS_CONTRACT family (boot.warning, boot.refusal, cli, config.migrate, admin.ops, ops.scrape)
+# even when the rewritten pair was byte-identical: 18 real boot.warning cells in busbar's own corpus
+# went from ACCEPTED under v0.2.3/v0.3.0's tool-side conditions to a phantom RED under v0.3.1,
+# purely because their family rates `body` 10 and D-1 is `kind: improvement`. Nothing was being
+# forgiven — the rewrite already accounted for the entire difference — so nothing should have been
+# refused.
+pp_cells() {  # <out> — self|b|stream reclassified onto a BODY_IS_CONTRACT family, like busbar's boot.warning
+  python3 - "$CELLS" "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d["cells"]:
+    if c["id"] == "self|b|stream":
+        c["family"] = "boot.warning"
+json.dump(d, open(sys.argv[2], "w"))
+EOF
+}
+pp_cells "$W/pp-cells.json"
+cat >"$W/pp-accept.json" <<'JSON'
+{"accepted":[{"id":"PP-1 diag suffix","kind":"improvement","by":"selftest","cells":"^self\\|b\\|stream$","expected_cells":1,"rationale":"selftest: a D-1-shaped mid-line diagnostic-code suffix, never a prefix","transform":{"candidate":[[" diag=BUSBAR-\\d{4}",""]]}}]}
+JSON
+
+# (pp1) body differs ONLY by the diag suffix (mid-line, not a prefix) -> ACCEPTED, on a family
+# whose `body` is rated 10 (money). This is the exact shape of the real regression: RED under the
+# v0.3.1 family-money subtraction, GREEN once a transform's own `allowed` is what decides.
+cp -R "$FIX" "$W/pp1-c"
+python3 - "$W/pp1-c/cells/self__b__stream.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["text"] = d["body"]["text"].replace("hi", "hi diag=BUSBAR-3010")
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/pp1-c" --out "$W/out-pp1" --cells "$W/pp-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/pp-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-pp1.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-pp1/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" = 0 ] && [ "$status_col" = PASS ] && [[ "$title_col" == *"ACCEPTED"* ]] && [[ "$title_col" == *"PP-1"* ]] \
+  && say PASS "an improvement transform takes 'body' on a BODY_IS_CONTRACT family once the rewrite makes the pair byte-identical (the real 18-cell regression, reproduced and fixed)" \
+  || say FAIL "PP-1 body-only diag suffix on a BODY_IS_CONTRACT family was not accepted: rc=$rc status=$status_col title=$title_col"
+
+# (pp2) …but if the body ALSO differs somewhere the transform's pattern never touches, the rewritten
+# pair is NOT byte-identical, the fired-transform branch never runs, and the cell stays RED — an
+# `improvement` transform still may not launder a real difference on a money-rated family.
+cp -R "$FIX" "$W/pp2-c"
+python3 - "$W/pp2-c/cells/self__b__stream.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["text"] = d["body"]["text"].replace("hi", "hi diag=BUSBAR-3010").replace("[DONE]", "[WRONG]")
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/pp2-c" --out "$W/out-pp2" --cells "$W/pp-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/pp-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-pp2.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-pp2/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" == *"body"* ]] \
+  && say PASS "…and a body diff OUTSIDE the diag suffix on the same money-rated family still stays RED [body]" \
+  || say FAIL "PP-2 body diff beyond the transform's pattern was not red: rc=$rc status=$status_col title=$title_col"
+
+# (pp3) …and if only STATUS differs (a field no transform ever touches), the fired-transform branch
+# never runs either — status is untouched by the rewrite, so compare(g_t, cc_t) still names it and
+# the cell stays RED [status], never credited to an `improvement` entry (status is globally MONEY
+# and D-1-shaped entries are never `kind: breaking`).
+cp -R "$FIX" "$W/pp3-c"
+python3 - "$W/pp3-c/cells/self__b__stream.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["body"]["text"] = d["body"]["text"].replace("hi", "hi diag=BUSBAR-3010")
+d["status"] = 500
+json.dump(d, open(p, "w"), separators=(",", ":"), sort_keys=True)
+EOF
+bash "${here}/replay.sh" --golden "$FIX" --candidate "$W/pp3-c" --out "$W/out-pp3" --cells "$W/pp-cells.json" \
+  --allow-harness-skew --no-check-golden --accepted "$W/pp-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-pp3.log" 2>&1
+rc=$?
+row="$(awk -F'\t' '$1=="self|b|stream"{print; exit}' "$W/out-pp3/ledger.tsv")"
+status_col="$(cut -f2 <<<"$row")"; title_col="$(cut -f3 <<<"$row")"
+[ "$rc" != 0 ] && [ "$status_col" = FAIL ] && [[ "$title_col" == status* ]] \
+  && say PASS "…and a status divergence beside an otherwise-forgivable diag suffix still stays RED [status], never taken by the transform" \
+  || say FAIL "PP-3 status divergence was not red: rc=$rc status=$status_col title=$title_col"
+
+# (pp4) A transform pattern that can match the empty string (or names no literal text at all) is
+# refused at LOAD. "Byte-identical after the rewrite" only proves the rewrite named the right token
+# when the pattern IS a token; `.*`/`\s*`/`(.|\n)*` can swallow arbitrary surrounding content and
+# would make PP-1's proof vacuous — it would "explain" any divergence, not just a diagnostic suffix.
+for bad_pat in '.*' '\s*' '(.|\n)*' '\d+'; do
+  python3 - "$W/pp4-accept.json" "$bad_pat" <<'EOF'
+import json, sys
+e = {"id": "PP-4 too broad", "kind": "improvement", "by": "selftest", "cells": r"^self\|b\|stream$",
+     "expected_cells": 1, "rationale": "selftest: an over-broad transform pattern",
+     "transform": {"candidate": [[sys.argv[2], ""]]}}
+json.dump({"accepted": [e]}, open(sys.argv[1], "w"))
+EOF
+  bash "${here}/replay.sh" --golden "$FIX" --candidate "$FIX" --out "$W/out-pp4" --cells "$W/pp-cells.json" \
+    --allow-harness-skew --no-check-golden --accepted "$W/pp4-accept.json" --baseline "$W/no-baseline.txt" >"$W/out-pp4.log" 2>&1
+  rc=$?
+  grep -qi "refused" "$W/out-pp4.log" && msg_ok=1 || msg_ok=0
+  if [ "$rc" != 0 ] && [ "$msg_ok" = 1 ]; then
+    say PASS "an over-broad transform pattern ($bad_pat) is refused at load"
+  else
+    say FAIL "an over-broad transform pattern ($bad_pat) was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-pp4.log)"
+  fi
+done
+
 # (o) one mutation per remaining class. Each fragment edits ONLY the candidate's self|a|ok cell, so
 # the expected outcome is always: exactly one FAIL, whose class column is exactly the named class.
 # A class that shows up alongside another (or not at all) is a differ that cannot name what moved.
