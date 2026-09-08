@@ -911,7 +911,11 @@ cp -R "$rn" "$rn-before"
 if bash "${here}/renormalize.sh" --cells "$W/renorm-cells.json" "$rn" >"$W/renorm.log" 2>&1; then
   say FAIL "renormalize.sh applied a script cell's keep spec that record.sh never passes, and exited 0"
 else
-  if grep -q 'self|s|script' "$W/renorm.log" && grep -q 'record.sh:825' "$W/renorm.log" \
+  # The refusal must NAME the recorder call site whose behaviour it is reproducing. Asserted on the
+  # call site's NAME, not on a line number: this case used to demand the literal `record.sh:825`, so
+  # every edit to record.sh above that line made the citation wrong and CORRECTING it turned this
+  # case red for the wrong reason.
+  if grep -q 'self|s|script' "$W/renorm.log" && grep -q "script call site" "$W/renorm.log" \
      && cmp -s "$rn-before/cells/self__s__script.json" "$rn/cells/self__s__script.json"; then
     say PASS "renormalize.sh refuses a cell whose spec record.sh's own call site would not have passed, and leaves the cell untouched"
   else

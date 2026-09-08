@@ -53,11 +53,17 @@ for raw in "$d"/raw/*/; do
   # This file's whole claim is that it re-derives a cell "exactly as record.sh passes it". record.sh
   # does NOT have one normalize.py invocation; it has four, and they pass different flags:
   #
-  #   driver      record.sh call site           passes
-  #   http        record.sh:984                 --key-id, --keep-body-lines, --keep
-  #   exec        record.sh:526                 --keep-body-lines, --keep      (no --key-id)
-  #   concurrent  record.sh:740                 --key-id, --driver concurrent  (no keep spec)
-  #   script      record.sh:825                 nothing at all
+  # NAMED BY CALL SITE, NOT BY LINE NUMBER. This table cited `the recorder's http call site / 526 / 740 / 825`, and
+  # every one of those numbers was stale — record.sh's four invocations had moved. Worse, a self-test
+  # asserted on the literal line number, so CORRECTING the citation turned that case red
+  # for the wrong reason. A citation that rots silently is worse than none; these name the function
+  # or block that makes the call, which is a thing that can be searched for and does not move.
+  #
+  #   driver      record.sh call site                       passes
+  #   http        the main loop's http/llm tail             --key-id, --keep-body-lines, --keep
+  #   exec        record_exec_cell()                        --keep-body-lines, --keep   (no --key-id)
+  #   concurrent  record_concurrent_cell()                  --key-id, --driver concurrent (no keep spec)
+  #   script      the main loop's `driver = script` branch  nothing at all
   #
   # Passing all three uniformly, as this loop did, means a `keep` or `body_lines` on a script or
   # concurrent cell is applied HERE and was never applied by the recorder: the re-normalized cell is
@@ -75,18 +81,18 @@ for raw in "$d"/raw/*/; do
     http) ;;
     exec)
       if [ -n "$kid" ]; then
-        echo "renormalize: $id is an exec cell but its capture carries a key-id; record.sh:526 normalizes exec cells WITHOUT --key-id, so re-deriving it here would not reproduce the recorded cell" >&2
+        echo "renormalize: $id is an exec cell but its capture carries a key-id; record_exec_cell() normalizes exec cells WITHOUT --key-id, so re-deriving it here would not reproduce the recorded cell" >&2
         failed=$((failed+1)); continue
       fi ;;
     concurrent)
       if [ -n "$keep_spec" ] || [ -n "$keep_lines" ]; then
-        echo "renormalize: $id is a concurrent cell and cells.json gives it a keep/body_lines spec, but record.sh:740 normalizes concurrent cells with --key-id ALONE; applying the spec here would write a cell the recorder never made" >&2
+        echo "renormalize: $id is a concurrent cell and cells.json gives it a keep/body_lines spec, but record_concurrent_cell() normalizes concurrent cells with --key-id ALONE; applying the spec here would write a cell the recorder never made" >&2
         failed=$((failed+1)); continue
       fi
       keep_spec=""; keep_lines=""; driver_flag=(--driver concurrent) ;;
     script)
       if [ -n "$keep_spec" ] || [ -n "$keep_lines" ]; then
-        echo "renormalize: $id is a script cell and cells.json gives it a keep/body_lines spec, but record.sh:825 normalizes script cells with NO flags at all; applying the spec here would write a cell the recorder never made" >&2
+        echo "renormalize: $id is a script cell and cells.json gives it a keep/body_lines spec, but the recorder's script call site normalizes script cells with NO flags at all; applying the spec here would write a cell the recorder never made" >&2
         failed=$((failed+1)); continue
       fi
       kid=""; keep_spec=""; keep_lines="" ;;

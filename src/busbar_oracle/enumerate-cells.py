@@ -177,7 +177,7 @@ def floor_verdict(out: Path, generated: dict, argv) -> tuple:
         return 0, []
     floor, problem = committed_floor(out)
     if problem:
-        return 1, [f"enumerate-cells: refusing to generate against an unreadable reference:",
+        return 1, ["enumerate-cells: refusing to generate against an unreadable reference:",
                    f"  - {problem}"]
     accepted = accepted_shrinks(argv)
     unknown = unknown_shrinks(accepted, floor)

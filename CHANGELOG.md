@@ -1,0 +1,178 @@
+# Changelog
+
+Released by tag. A consumer pins `tag@sha256` and folds it into its harness revision,
+so every entry here is a harness change by definition — a recording made before it and
+one made after it are not comparable without saying so out loud.
+
+## 0.3.0
+
+Four external audits of the tool at `v0.2.3` are the source of this release. Every
+change below closes a path by which the oracle could report **GREEN over something it
+had not compared**, and every one ships with a self-test case that was red before it
+and is green after — in `busbar-oracle replay-selftest`, `cells --selftest`,
+`fixture-gate-selftest`, `rigs-ledger --selftest` or `oracle-config.sh --selftest`,
+never a new test runner.
+
+### The corpus can no longer shrink unseen
+
+- **A corrupt `cells.json` is refused as a floor.** `enumerate-cells.py` swallowed
+  `json.JSONDecodeError` on the committed corpus, skipped the per-family floor
+  entirely, and `--write` then committed the shrunken corpus **as the new reference**
+  in the same command. A reference that cannot be read is not a reference that says
+  "anything goes". Also refused: a `counts.by_family` that is missing, or that gives a
+  count which is not a non-negative integer (that family had silently had no floor),
+  and an `--accept-family-shrink` naming a family the corpus does not have. `--write`
+  is now atomic, and importing the product's cell module no longer writes
+  `__pycache__` into the tree the gate asserts is clean.
+
+- **A baselined cell deleted from `cells.json` is RED.** `replay.sh`'s owed-baseline
+  ratchet names that case first in its own header and could not see it: `owed` and the
+  gap list are both derived *from* `cells.json`, so an id removed from the corpus was
+  in neither, and `if cid not in scope: continue` dropped it in silence. The default
+  reason string on that branch was provably unreachable. `diff-cells.py` now writes
+  `corpus-ids.txt` and `selected-ids.txt`, and the ratchet distinguishes "this id left
+  the corpus" (red, unless `accepted-gaps.json` names it) from "this run used
+  `--family` and never looked at it" (still skipped).
+
+- **`extra.candidate`: a cell the candidate recorded that nothing compared.** Every
+  loop in the differ walks the OWED set, which comes from the golden, so a cell file
+  the candidate wrote that the golden does not owe was invisible — no row, no class,
+  no line. That covers a gap the candidate has closed, the *other half of a rename*,
+  and a stale file from an earlier recording into the same `--out`. Reported on its
+  own ledger row, in `extra-candidate.txt`, in `report.json` and in `report.md`. Not
+  red by default (nothing was compared); `--refuse-extra-candidate` makes it red, and
+  the ids reach `EXPECTED_IDS` so the verdict actually reads them.
+
+### The provenance guard covers the whole recording
+
+- **Harness skew is a set, not a scalar.** The guard was one equality on
+  `meta.json.harness_rev` — a field `merge-recordings.py`, `renormalize.sh` and a text
+  editor all overwrite. A golden merged from a part recorded under revision A and a
+  part recorded under B is stamped `B`, so a candidate recorded today under B satisfied
+  it exactly and the differ compared A's cells against B's with nothing said. The
+  provenance is now `harness_rev` ∪ `harness_rev_history` ∪ `merged_from[].harness_rev`
+  ∪ `harness_rev_recorded`, and the two sides must name the same set.
+  `harness_rev_recorded` — a field no file in this repository wrote or read, while
+  sitting in a shipped golden carrying a real digest — is now written by both
+  re-stampers (once, so the original recording revision survives every later re-stamp)
+  and read here. `report.json` gains `golden_harness_revs` / `candidate_harness_revs`.
+
+  **Consuming products should expect this to bite.** A golden that was merged or
+  re-normalized is mixed-revision by construction, and a fresh candidate is not: such
+  a pair is now refused unless `--allow-harness-skew` is passed deliberately, or the
+  golden is re-normalized to a single revision.
+
+### Money classes are armed where they were not
+
+- **Concurrent cells capture their real egress.** `capture-concurrent.py` hardcoded
+  `"effects": {… "egress": []}` — which is `capture.py`'s own spelling of "this cell
+  must never reach upstream" — on cells that bill for eight upstream requests.
+  `effects.egress` is rated 10 and is a MONEY class, so on every concurrency/queue cell
+  a candidate that sent a mangled system prompt, dropped the tool list, leaked a client
+  header upstream or doubled its upstream attempts diverged on nothing: `[] == []`,
+  `PASS identical`. The one other witness (`busbar_upstream_attempts_total`) is masked
+  on this very driver. The recorder now snapshots egress around the burst, settles it,
+  and names the files, exactly as the single-request path does.
+
+- **The "an `improvement` may not forgive money" rule is keyed on the RATED weight.**
+  `MONEY_CLASSES` is keyed on the class and asserted against `CLASS_WEIGHT`; the weight
+  a divergence is actually scored with is keyed on the FAMILY. On the six
+  `BODY_IS_CONTRACT` families the `body` class is rated 10 while `CLASS_WEIGHT` rates
+  it 3 and `MONEY_CLASSES` does not name it — so a four-line `improvement` entry with
+  no `kind: breaking` and no changelog line could waive the entire stdout and stderr of
+  a boot refusal, the only thing such a cell records, weighted 10 in the D/W ratio. The
+  file's own assertion could not catch it because it never looked at the family path.
+  One function (`rated_weight`) now answers both questions; entries that lose reach are
+  named on stderr when the register loads. Also fixed here: a declared `"weight"` could
+  price a money divergence as a cosmetic one, and `"weight": 0` silently became 10.
+
+- **Egress ordering no longer depends on the recording host's locale.** The order of
+  the egress filenames *is* the recorded order of the upstream requests; `sort` and
+  `comm` are pinned `LC_ALL=C`, as `harness-rev.sh` already pins its own glob.
+
+### A recording is what a driver that succeeded produced
+
+- **A script cell passes when its driver exited 0, into a directory this run emptied.**
+  PASS meant "a non-empty `captured.json` exists, its status is not -1, and it carries
+  no `effects.harness_error`" — the exit status of the process that wrote the file was
+  discarded at the invocation, and three drivers in the consuming product define no
+  `fail()` and no `harness_error` at all, so for those the file test was the whole gate.
+  Nothing cleared the output directory either, so on a re-record into an existing
+  `--out` that file could be *the previous run's*. The give-up ordering was also wrong:
+  `status == -1` was tested before `harness_error` and `continue`d, so a driver that
+  gave up **and marked it correctly** was filed as a named gap — and a SKIP row leaves
+  the owed set entirely. One rule now, in one order, in `script_cell_verdict()`, which
+  the self-test drives directly.
+
+- **The fixture gate refuses a `needs_fixture` it cannot read.** `${!1}` requires a
+  valid shell identifier; on anything else bash prints `invalid variable name` and
+  **aborts the enclosing compound command**, so the recorder's
+  `if oracle_fixture_missing …; then SKIP; continue; fi` ran neither branch, fell
+  through, and **recorded the cell with its fixture absent** — freezing whatever a
+  product with no backend answers into the golden, with a PASS row, reproduced by every
+  candidate. (`needs_fixture: 1` was the same hole by indirecting onto `$1`.) The gate
+  now answers three ways — gap, record, or *this is not a fixture gate* — and the third
+  is a red row. `fixture-gate-selftest` checks every value in the product's own corpus
+  against it.
+
+- **`oracle_write_config` and `oracle_env` cannot name different directories.** One
+  wrote to `$1`, the other booted from `$WORK`; the pair was correct only because every
+  shipped driver happens to export the same value. It is now bound, and a caller whose
+  `WORK` names somewhere else is refused rather than served a config it did not write.
+
+### The rig ledger fails closed
+
+`rigs-ledger.sh` had four ways to report green having compared nothing, and all four
+are now rows:
+
+- a **corrupt baseline** made the fold throw, produced no rows, and `[ -n "$rows" ]`
+  read that as "no regressions" — every signed-off row unchecked. The exit status is
+  captured (as the file's four other folds already did) and a fold that threw is
+  `baseline|_fold_failed`, red and owed;
+- a **missing baseline** was an advisory line. It is `baseline|_missing`, red and owed
+  — except under `--rebaseline`, which is the run that creates the first one;
+- **`--rebaseline` skipped the diff**, so it refused to sign off a FAIL and happily
+  signed off an *absence*: a scenario that stopped executing became the new floor.
+  The comparison now runs under it too;
+- **`--check` was parsed and never read**, so the one caller that asked for the
+  baseline comparison out loud got the same run as one that did not. It now refuses a
+  run with no baseline, and refuses to be combined with `--rebaseline`.
+
+New: `--accept-baseline-loss <row-id>` (repeatable), so a reviewed removal is named in
+the command line of the commit that makes it rather than accepted by the absence of a
+check.
+
+### The self-tests can no longer pass vacuously
+
+- case (y), the owed ratchet, was **skipped in silence** when `owed-baseline.txt` was
+  empty or absent — the one state in which every ratchet the file provides is gone. An
+  empty baseline beside a golden that owes cells is now the finding;
+- the `harness_error` guard triggered only on a **literal digit** after `fail`, so
+  `fail "$rc" …` was skipped entirely, and it asked the whole FILE for the string
+  rather than the give-up path. Both widened, plus a new check for a give-up written
+  inline rather than through `fail()`;
+- a case that **could not run** now reports `SKIP` and is counted in the summary
+  instead of reporting `PASS` (the `SUPERVISOR_MARKERS` check and the owed ratchet);
+- the driver-contract case's "beside itself" arm resolved against an empty temp
+  directory, so it would have passed with the extraction reverted. It resolves against
+  the product's own `scripts/` directory now, and says so when the layout cannot
+  discriminate;
+- two independent cases shared `$W/renorm`, so one measured the other's leftovers;
+- `renormalize.sh`'s faithfulness table cited `record.sh` **line numbers** that had all
+  rotted, and a self-test asserted on one of them — so correcting the comment turned
+  the case red for the wrong reason. Call sites are named by function now.
+
+### Documentation
+
+- the README claimed "Nothing in this repository knows anything about busbar", which is
+  not true of this tool and never was: the release URL, the directory layout it sources
+  from, the plane vocabulary, the dialect table and several transcribed source
+  behaviours are all the product's. Corrected to the claim that is true and that the
+  code actually enforces — a *product* file is never resolved against the tool's own
+  directory — which the self-tests check as a class.
+
+## 0.2.3 and earlier
+
+See the tag history. `0.2.x` was the extraction of the oracle out of the product's tree:
+the tool/data seam, the driver contract (`BUSBAR_ORACLE_TOOL_DIR`), the harness revision
+covering the tool by digest and the data by hash, and the self-tests for each.

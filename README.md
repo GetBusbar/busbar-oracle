@@ -5,7 +5,17 @@ effects, per *cell* — and replays that recording against any later binary, so 
 difference in the report is a difference in the product.
 
 It was built to keep [busbar](https://github.com/GetBusbar/busbar) honest across a
-major version. Nothing in this repository knows anything about busbar.
+major version, and it is still a busbar-shaped instrument that has been *parameterized*
+rather than a product-agnostic one: the release URL it fetches a golden binary from, the
+directory layout it prefers to source a product's ledger helpers out of, the plane and
+dialect vocabulary, and several behaviours transcribed from busbar's own source all name
+that product. What **is** true, is enforced, and is what the seam below is about:
+
+> **A product file is never resolved against the tool's own directory.**
+
+Everything a product owns — its cells, its golden, its registers, its drivers, its
+fixtures, its pins — is named by `--data` / `--product-root`, and the self-tests check
+that as a class over every shipped file rather than as a list of known offenders.
 
 ## What a cell is
 
@@ -145,6 +155,16 @@ exactly as before, so recordings made under that layout stay verifiable.
 Also available: `replay-selftest`, `fetch-plugin`, `rigs-ledger`, `apply-mutation`,
 `build-request`, `capture`, `fixture-gate-selftest`.
 
+### Flags a gate should know about
+
+| flag | on | means |
+|---|---|---|
+| `--allow-harness-skew` | `replay`, `diff` | compare two recordings whose **whole provenance** does not match. Since 0.3.0 that is the set of every revision a recording's cells came from (`harness_rev`, `harness_rev_history`, `merged_from[].harness_rev`, `harness_rev_recorded`) — a merged or re-normalized golden is mixed-revision by construction and a fresh candidate is not, so such a pair is refused until this is passed deliberately or the golden is re-normalized to one revision |
+| `--refuse-extra-candidate` | `replay`, `diff` | make `extra.candidate` rows RED. A cell the candidate recorded that the golden does not owe is *reported* by default and red only on request: nothing was compared, so it is not a divergence — but silence about it is how a rename reads as a deletion |
+| `--accept-family-shrink <family>` | `cells` | a reviewed, named loss of cells from one family. Anything else that shrinks a family — including a `cells.json` too corrupt to read as the floor — is refused |
+| `--accept-baseline-loss <row-id>` | `rigs-ledger` | a reviewed, named row that was PASS at the last sign-off and is deliberately not expected any more |
+| `--check` | `rigs-ledger` | demand the baseline comparison actually happened: refuses a run with no baseline, and refuses to be combined with `--rebaseline` |
+
 ## Ported to Python, or shipped as a script?
 
 **Nothing was ported. Every bash driver ships as the file that produced the existing
@@ -156,16 +176,16 @@ during a move.* Every bash file here does one of those three things:
 
 | file | lines | why it is not a port |
 |---|---|---|
-| `record.sh` | ~1080 | records |
-| `rigs-ledger.sh` | ~840 | records, and writes the ledger a verdict is read from |
-| `replay-selftest.sh` | ~430 | judges the judge |
-| `oracle-config.sh` | ~290 | decides what the recorded binary is configured with — a config change moves 30+ cells |
-| `fetch-golden.sh` | ~230 | verifies a pinned digest |
-| `replay.sh` | ~200 | judges |
-| `selftest.sh` | ~90 | judges |
-| `harness-rev.sh` | ~76 | *is* the definition of "the harness changed"; its output is committed into every golden |
-| `renormalize.sh` | ~69 | rewrites recordings |
-| `fetch-plugin.sh` | ~45 | verifies a pinned digest |
+| `record.sh` | ~1290 | records |
+| `rigs-ledger.sh` | ~940 | records, and writes the ledger a verdict is read from |
+| `replay-selftest.sh` | ~1720 | judges the judge |
+| `oracle-config.sh` | ~440 | decides what the recorded binary is configured with — a config change moves 30+ cells |
+| `fetch-golden.sh` | ~240 | verifies a pinned digest |
+| `replay.sh` | ~290 | judges |
+| `selftest.sh` | ~91 | judges |
+| `harness-rev.sh` | ~195 | *is* the definition of "the harness changed"; its output is committed into every golden |
+| `renormalize.sh` | ~190 | rewrites recordings |
+| `fetch-plugin.sh` | ~51 | verifies a pinned digest |
 
 `harness-rev.sh` and `fetch-plugin.sh` are thin enough to port, and were left alone
 anyway: one emits a hash that is already committed inside every existing golden's
@@ -186,7 +206,15 @@ busbar-oracle fixture-gate-selftest    # both arms of the fixture gate
 busbar-oracle replay-selftest          # the judge, against a fixture recording
 busbar-oracle apply-mutation --selftest # the mutation applier, incl. the data-dir fixture seam
 busbar-oracle merge --selftest         # the merge provenance rule
+busbar-oracle cells --selftest         # the per-family corpus floor, and the reference it is read from
+busbar-oracle rigs-ledger --selftest   # the rig ledger's baseline, floors and refusals
+busbar-oracle capture --selftest       # the effect-delta guards
+bash "$(python3 -c 'import busbar_oracle,os;print(os.path.dirname(busbar_oracle.__file__))')/oracle-config.sh" --selftest
 ```
+
+A case that **cannot run** in the layout it was invoked in reports `SKIP` and is counted
+on the last line — never `PASS`. A static case that can pass vacuously is worse than no
+case, so several of them assert on a non-empty input set before they assert anything else.
 
 These run against the tiny fixture product in `tests/fixture-product/` and need no
 real binary, so the tool is testable in this repository alone.
@@ -200,7 +228,7 @@ interpreter that runs the recorder.
 
 ## Versioning
 
-Released by tag. Consumers should pin a tag *and* the sha256 of the release archive,
+See [CHANGELOG.md](CHANGELOG.md). Released by tag. Consumers should pin a tag *and* the sha256 of the release archive,
 and treat a change to either as a harness change — because it is one.
 
 ## License
