@@ -152,6 +152,7 @@ Usage: normalize.py <captured.json> [--key-id <id>] > normalized.json
   captured.json: {"status": int, "headers": {..}, "body": "<utf8 or base64:...>", "effects": {..}}
 """
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -655,6 +656,210 @@ def norm_body(body: str, applied: set, key_id: str | None, keep_json_keys: set |
     return {"text": norm_text("\n".join(lines), applied, keep_regex)}
 
 
+# ── WS FRAMES: WHAT A SESSION SAYS, WITH ONLY THE NONCES TAKEN OUT ───────────────────────────────
+# A `ws` cell's contract is its TRANSCRIPT: the ordered frames, both directions, and the close. Every
+# real dialect stamps those frames with values that are new on every run — an OpenAI Realtime event
+# carries a fresh `event_id`, a response and an item carry ids minted per turn, a Twilio media
+# message carries a `streamSid` and a millisecond `timestamp`, and every one of them carries audio.
+# Recorded raw, a session golden is a nonce: it can never be reproduced, so it can never be a diff.
+#
+# THE DIALECT'S CANONICALISER IS DATA, KEYED BY DIALECT NAME. There is no `if dialect == "openai"`
+# anywhere below: `norm_ws` reads a row out of WS_DIALECTS and knows nothing about any provider.
+# Adding a dialect is adding a row — the same shape the mock's WS_DIALECTS uses for the other end of
+# the same socket — and a dialect this table does not know is LOUD (`ws.dialect-unknown` joins
+# `applied`, which is itself the norm.rules diff class) rather than quietly recorded as a nonce.
+#
+# IDS ARE INTERNED, NOT BLANKED. Replacing every id with one `<ID>` would throw away the thing the
+# transcript is for: `response.text.delta` and `response.done` naming the SAME `response_id` is how
+# a reader knows they are one turn, and two turns interleaved on one socket is a real bug that a
+# single placeholder would hide. Each distinct value gets the next `<ID:n>` in first-appearance
+# (wire) order, across the whole session and across every id key and pointer at once — so the
+# correlation survives, the nonce does not, and a door that started reusing an id is a diff.
+#
+# AUDIO IS LENGTH AND DIGEST. A base64 audio payload is tens of kilobytes of bytes nobody will read,
+# and a golden full of them is unreviewable; but dropping it entirely would mean a door that sent
+# silence, or truncated a turn, recorded identically to one that did not. `{"bytes": N, "sha256":
+# …}` keeps exactly the two facts that are a contract. This is neutral, not per-dialect: every
+# BINARY frame is treated this way whatever the dialect, because a binary frame on a realtime
+# session is audio by construction. Which TEXT keys carry base64 audio is the dialect's business,
+# and lives in its row.
+class _Audio:
+    """A hashed audio payload, held as an object rather than a string until the very end of the walk.
+
+    Not a nicety: `ID_RULES`' own `\\b[0-9a-fA-F]{32,}\\b` -> `<HASH>` rule would otherwise eat the
+    sha256 this exists to record, and the digest that distinguishes a real turn from silence would
+    be normalized away by the rule that scrubs seals. A non-str never reaches a str rule."""
+
+    __slots__ = ("n", "digest")
+
+    def __init__(self, raw: bytes):
+        self.n, self.digest = len(raw), hashlib.sha256(raw).hexdigest()
+
+    def out(self) -> dict:
+        return {"bytes": self.n, "sha256": self.digest}
+
+
+WS_DIALECTS = {
+    # OpenAI Realtime. Every server event carries a fresh `event_id`; a turn's `response_id` and
+    # `item_id` are minted per turn and repeat across the frames of that turn (which is why they are
+    # interned, not blanked). `delta` is the ambiguous one — TEXT on `response.text.delta`, base64
+    # PCM on `response.audio.delta` — so it is listed per event, never as a bare key name.
+    "openai-realtime": {
+        "event_pointer": "/type",
+        "id_keys": ("event_id", "item_id", "response_id", "previous_item_id", "call_id"),
+        "id_pointers": ("/session/id", "/response/id", "/item/id"),
+        "ts_keys": ("created_at", "expires_at"),
+        "audio_keys": ("audio",),
+        "audio_event_keys": {"response.audio.delta": ("delta",)},
+    },
+    # Gemini Live (BidiGenerateContent). The event is the one top-level key, so there is no event
+    # pointer; audio rides in `data` (realtimeInput.mediaChunks[].data, inlineData.data).
+    "gemini-live": {
+        "event_pointer": None,
+        "id_keys": ("responseId", "sessionId"),
+        "id_pointers": (),
+        "ts_keys": (),
+        "audio_keys": ("data",),
+        "audio_event_keys": {},
+    },
+    # Twilio Media Streams — the SERVED leg, where busbar is the socket's server. `sequenceNumber`
+    # and `media.chunk` are deliberately NOT scrubbed: they are counters, and a door that skipped
+    # one is exactly the bug this family exists to catch. `timestamp` is milliseconds of wall clock
+    # since the stream began, and is.
+    "twilio-media": {
+        "event_pointer": "/event",
+        "id_keys": ("streamSid", "callSid", "accountSid"),
+        "id_pointers": (),
+        "ts_keys": ("timestamp",),
+        "audio_keys": ("payload",),
+        "audio_event_keys": {},
+    },
+    # The dialect-free echo the recorder's own tests use: nothing to canonicalise, and saying so as
+    # a ROW is the point — it is a dialect this table knows, so no `ws.dialect-unknown` fires.
+    "echo": {
+        "event_pointer": None,
+        "id_keys": (),
+        "id_pointers": (),
+        "ts_keys": (),
+        "audio_keys": (),
+        "audio_event_keys": {},
+    },
+}
+NEUTRAL_WS_DIALECT = {"event_pointer": None, "id_keys": (), "id_pointers": (), "ts_keys": (),
+                      "audio_keys": (), "audio_event_keys": {}}
+
+
+def ws_event_name(doc, row):
+    """The frame's event name, by the dialect's own rule: an RFC 6901 pointer (`/type`, `/event`),
+    or — when the row names none — the single top-level key, which is how Gemini Live spells it."""
+    if not isinstance(doc, dict):
+        return None
+    ptr = row.get("event_pointer")
+    if ptr:
+        cur = doc
+        for tok in ptr[1:].split("/"):
+            tok = tok.replace("~1", "/").replace("~0", "~")
+            if not isinstance(cur, dict) or tok not in cur:
+                return None
+            cur = cur[tok]
+        return cur if isinstance(cur, str) else None
+    return next(iter(doc), None) if len(doc) == 1 else None
+
+
+def norm_ws_doc(v, row, event, audio_keys, ids: dict, applied: set, key_id: str | None, path: str = ""):
+    """One frame's JSON, walked once. `path` is the RFC 6901 pointer of the current node — the
+    repo's addressing idiom, the same one the cell's `await` steps are written in."""
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            child = f"{path}/{str(k).replace('~', '~0').replace('/', '~1')}"
+            if k in audio_keys and isinstance(x, str):
+                try:
+                    out[k] = _Audio(base64.b64decode(x, validate=True)); applied.add("ws.audio"); continue
+                except Exception:
+                    # a key the dialect says is audio, carrying something that is not base64, is
+                    # left alone and NAMED: silently passing it through would hide the day a door
+                    # changed the encoding of the one field this rule exists to summarise.
+                    applied.add("ws.audio-undecodable")
+            if k in row["id_keys"] or child in row["id_pointers"]:
+                if x is None:
+                    out[k] = None; continue
+                out[k] = ids.setdefault(json.dumps(x, sort_keys=True), f"<ID:{len(ids) + 1}>")
+                applied.add("ws.frame-id"); continue
+            if k in row["ts_keys"] or k in TS_KEYS:
+                if x is not None:
+                    out[k] = "<TS>"; applied.add("ws.frame-ts"); continue
+            out[k] = norm_ws_doc(x, row, event, audio_keys, ids, applied, key_id, child)
+        return out
+    if isinstance(v, list):
+        return [norm_ws_doc(x, row, event, audio_keys, ids, applied, key_id, f"{path}/{i}") for i, x in enumerate(v)]
+    if isinstance(v, str):
+        s = v if key_id is None else v.replace(key_id, "<KEY>")
+        return norm_scalar_str(s, applied)
+    return v
+
+
+def _audio_out(v):
+    if isinstance(v, _Audio):
+        return v.out()
+    if isinstance(v, dict):
+        return {k: _audio_out(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_audio_out(x) for x in v]
+    return v
+
+
+def norm_ws(ws: dict, applied: set, key_id: str | None) -> dict:
+    """The `ws` block: the handshake check, the ordered frames, the close.
+
+    Pulled out before the generic pass and given only this treatment, exactly as `egress` is — the
+    reasoning is the same one recorded there. A text frame's JSON is canonicalised here (dialect
+    ids interned, dialect timestamps blanked, dialect audio hashed, ordinary scalars through the
+    shared `norm_scalar_str`) and never through `norm_json`, whose key-name rules were written for
+    response bodies and would reach into a frame by coincidence of naming."""
+    dialect = ws.get("dialect")
+    row = WS_DIALECTS.get(dialect)
+    if row is None:
+        applied.add("ws.dialect-unknown"); row = NEUTRAL_WS_DIALECT
+    ids: dict = {}
+    frames = []
+    for f in ws.get("frames") or []:
+        g = dict(f)
+        if "base64" in g and g.get("opcode") in ("binary", "continuation"):
+            # NEUTRAL, NOT PER-DIALECT: a binary frame on a realtime session is audio by
+            # construction, whichever provider's grammar the text frames are in.
+            try:
+                g["base64_audio"] = _Audio(base64.b64decode(g.pop("base64"), validate=True)).out()
+                applied.add("ws.binary-payload")
+            except Exception:
+                applied.add("ws.binary-undecodable")
+        if "text" in g:
+            stripped = g["text"].strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    doc = json.loads(stripped)
+                except ValueError:
+                    doc = None
+                if doc is not None:
+                    ev = ws_event_name(doc, row)
+                    audio_keys = set(row["audio_keys"]) | set(row["audio_event_keys"].get(ev, ()))
+                    g.pop("text")
+                    g["json"] = _audio_out(norm_ws_doc(doc, row, ev, audio_keys, ids, applied, key_id))
+                    frames.append(g); continue
+            # a frame that is not JSON is still a frame: the shared scalar rules, nothing more
+            g["text"] = norm_scalar_str(g["text"] if key_id is None else g["text"].replace(key_id, "<KEY>"), applied)
+        if "reason" in g and isinstance(g["reason"], str):
+            g["reason"] = norm_scalar_str(g["reason"], applied)
+        frames.append(g)
+    close = dict(ws.get("close") or {})
+    if isinstance(close.get("reason"), str):
+        close["reason"] = norm_scalar_str(close["reason"], applied)
+    out = {k: v for k, v in ws.items() if k not in ("frames", "close")}
+    out["frames"] = frames
+    out["close"] = close
+    return out
+
+
 def normalize(cap: dict, key_id: str | None, keep_lines: str | None = None, keep: dict | None = None,
               driver: str | None = None) -> dict:
     keep = keep or {}
@@ -694,6 +899,9 @@ def normalize(cap: dict, key_id: str | None, keep_lines: str | None = None, keep
         "body": body,
         "effects": effects,
     }
+    if isinstance(cap.get("ws"), dict):
+        # BEFORE `applied` is frozen below, and never through norm_json: see norm_ws.
+        out["ws"] = norm_ws(cap["ws"], applied, key_id)
     if isinstance(out["effects"].get("stderr"), str):
         # The host-capability strip runs FIRST and ONLY here: stderr is the one place a line can be
         # about the machine rather than about busbar. It is deliberately not part of norm_text, which

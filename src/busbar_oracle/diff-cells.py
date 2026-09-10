@@ -69,7 +69,7 @@ from collections import Counter, defaultdict
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("BUSBAR_ORACLE_DATA") or _HERE
 
-CLASS_ORDER = ["missing.golden", "missing.candidate", "status", "headers", "body", "effects.stderr",
+CLASS_ORDER = ["missing.golden", "missing.candidate", "status", "ws", "headers", "body", "effects.stderr",
                "effects.usage", "effects.usage_after_restart", "effects.store_errors",
                "effects.metrics", "effects.audit", "norm.rules", "effects.egress", "effects.readback",
                "effects.files", "effects.script"]
@@ -84,6 +84,7 @@ EFFECT_KEYS_WITH_OWN_CLASS = set(NAMED_EFFECT_KEYS) | {"exec_rules"}
 # Money and refusal semantics dominate; cosmetics count but cannot outvote them.
 CLASS_WEIGHT = {"missing.golden": 10, "missing.candidate": 10, "status": 10, "effects.usage": 10,
                 "effects.usage_after_restart": 10, "effects.store_errors": 10,
+                "ws": 10,
                 "body": 3, "effects.stderr": 3, "effects.audit": 3, "headers": 1, "effects.metrics": 1, "norm.rules": 1, "effects.egress": 10, "effects.readback": 10, "effects.files": 10, "effects.script": 10}
 # The classes that are MONEY: an accepted difference may only carry one of these if it is a declared
 # breaking change with a changelog line. Usage that a restart did not preserve, and a store the
@@ -94,9 +95,15 @@ CLASS_WEIGHT = {"missing.golden": 10, "missing.candidate": 10, "status": 10, "ef
 # and as what) and effects.files (a binary writing a WAL/keyset/probe file where 1.5.5 wrote nothing,
 # invisible in every other class) were rated 10 but omitted here, so a plain `improvement` entry
 # could waive them.
+# `ws` is money for the same reason effects.egress is. A served session's TRANSCRIPT is the product:
+# a frame that stopped arriving is a turn the caller paid for and did not get, a close code that
+# moved from 1000 to 1011 is a session that failed after the meter started, and an audio digest that
+# changed is a different thing said down the line. None of those move `status` -- the handshake was
+# a 101 either way -- so if this class were waivable by a plain `improvement` entry, the whole
+# streams family would be gradeable on its handshake alone.
 MONEY_CLASSES = {"status", "effects.usage", "effects.usage_after_restart", "effects.store_errors",
                  "missing.candidate", "effects.egress", "effects.readback", "effects.files",
-                 "effects.script"}
+                 "effects.script", "ws"}
 assert MONEY_CLASSES <= set(CLASS_ORDER)
 assert {k for k, w in CLASS_WEIGHT.items() if w == 10} == MONEY_CLASSES | {"missing.golden"}, \
     "MONEY_CLASSES must name every class CLASS_WEIGHT rates 10 (missing.golden is a recorder bug, never acceptable at all)"
@@ -869,6 +876,38 @@ def body_diff(g, c):
     return {"kind": "shape", "golden": type(g).__name__, "candidate": type(c).__name__}
 
 
+def ws_diff(g, c) -> dict:
+    """Where two session transcripts first parted company, said in one line a reader can act on.
+
+    A frame list diffed as raw JSON prints the whole tail of the session when one frame went
+    missing near the front, which is the shape that makes a streams report unreadable. So: the
+    session-level facts first (one side had no session at all, the dialect changed, the handshake's
+    accept value stopped verifying), then the FIRST index at which the ordered frames differ, then
+    the close."""
+    if g is None or c is None:
+        return {"kind": "session", "golden": "session" if g else "no session",
+                "candidate": "session" if c else "no session"}
+    out: dict = {"kind": "frames"}
+    for k in ("dialect", "accept_ok", "key"):
+        if g.get(k) != c.get(k):
+            out[k] = {"golden": g.get(k), "candidate": c.get(k)}
+    gf, cf = g.get("frames") or [], c.get("frames") or []
+    if len(gf) != len(cf):
+        out["count"] = {"golden": len(gf), "candidate": len(cf)}
+    for i in range(min(len(gf), len(cf))):
+        if gf[i] != cf[i]:
+            out["first_divergent_frame"] = {"index": i, "paths": json_paths_diff(gf[i], cf[i])}
+            break
+    else:
+        if len(gf) != len(cf):
+            longer, side = (gf, "golden") if len(gf) > len(cf) else (cf, "candidate")
+            out["only_on"] = {"side": side,
+                              "frames": [{"dir": f.get("dir"), "opcode": f.get("opcode")} for f in longer[min(len(gf), len(cf)):][:8]]}
+    if g.get("close") != c.get("close"):
+        out["close"] = {"golden": g.get("close"), "candidate": c.get("close")}
+    return out
+
+
 def compare(g: dict, c: dict) -> tuple[list, dict]:
     classes, detail = [], {}
     if "__corrupt__" in g:
@@ -885,6 +924,14 @@ def compare(g: dict, c: dict) -> tuple[list, dict]:
     bd = body_diff(g.get("body"), c.get("body"))
     if bd is not None:
         classes.append("body"); detail["body"] = bd
+    # THE SESSION TRANSCRIPT, WHICH NO OTHER CLASS COVERS. `compare` walks status, headers, body and
+    # the effects keys; a `ws` cell's whole contract is a TOP-LEVEL `ws` block, so without this a
+    # candidate could drop half its frames, close 1011 where the golden closed 1000, or answer with
+    # a different dialect entirely, and the row would still print `PASS  identical`. The same hole
+    # the `effects.script` sweep was added to close, one level up.
+    gw, cw = g.get("ws"), c.get("ws")
+    if gw != cw:
+        classes.append("ws"); detail["ws"] = ws_diff(gw, cw)
     ge, ce = g.get("effects", {}), c.get("effects", {})
     for k in NAMED_EFFECT_KEYS:
         if ge.get(k) != ce.get(k):
@@ -953,6 +1000,29 @@ def first_diff_text(classes, detail) -> str:
         if d.get("kind") == "text":
             return f"body line {d.get('line')}: {d.get('golden','')[:80]!r} -> {d.get('candidate','')[:80]!r}"
         return "body shape differs"
+    if k == "ws":
+        if d.get("kind") == "session":
+            return f"ws {d['golden']} -> {d['candidate']}"
+        for f in ("dialect", "accept_ok", "key"):
+            if f in d:
+                return f"ws {f} {d[f]['golden']!r} -> {d[f]['candidate']!r}"
+        if d.get("first_divergent_frame"):
+            fr = d["first_divergent_frame"]
+            ps = fr.get("paths") or []
+            where = f" {ps[0]['path']}: {json.dumps(ps[0]['golden'])[:60]} -> {json.dumps(ps[0]['candidate'])[:60]}" if ps else ""
+            # THE COUNT LEADS WHEN IT MOVED. A frame that went missing near the front shifts every
+            # frame after it, so the "first divergent frame" alone reads as a content change at an
+            # arbitrary index -- the actionable fact is that the session is a frame short.
+            n = f"{d['count']['golden']} -> {d['count']['candidate']} frames; " if d.get("count") else ""
+            return f"ws {n}frame {fr['index']}{where}"
+        if d.get("only_on"):
+            o = d["only_on"]
+            return f"ws {len(o['frames'])}+ frame(s) only on the {o['side']}: " + ",".join(f"{x['dir']} {x['opcode']}" for x in o["frames"][:3])
+        if d.get("count"):
+            return f"ws frame count {d['count']['golden']} -> {d['count']['candidate']}"
+        if d.get("close"):
+            return f"ws close {json.dumps(d['close']['golden'])} -> {json.dumps(d['close']['candidate'])}"
+        return "ws"
     if k == "effects.stderr":
         return f"stderr line {d.get('line')}: {d.get('golden','')[:80]!r} -> {d.get('candidate','')[:80]!r}"
     if k.startswith("effects."):
