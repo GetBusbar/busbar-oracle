@@ -151,9 +151,77 @@ exactly as before, so recordings made under that layout stay verifiable.
 | `selftest` | `selftest.sh` | the tool's own self-tests |
 | `fetch-golden` | `fetch-golden.sh` | fetch and digest-verify a pinned golden binary |
 | `mock` | `mock-upstream.py` | the multi-dialect mock upstream |
+| `capture-ws` | `capture-ws.py` | the `ws` driver — drive and record one duplex session |
 
 Also available: `replay-selftest`, `fetch-plugin`, `rigs-ledger`, `apply-mutation`,
 `build-request`, `capture`, `fixture-gate-selftest`.
+
+### The `ws` driver
+
+A cell whose `driver` is `ws` records a **session**, not a request. `record.sh` opens a
+WebSocket against the door, drives a scripted client between its before- and
+after-snapshots, and records:
+
+| key | is |
+|---|---|
+| `status`, `headers` | the **handshake** — or, when the door refuses the upgrade, the whole ordinary HTTP response, body and all |
+| `ws.frames` | every frame in wire order, **both directions**: `{"dir": "out"\|"in", "opcode", "text"\|"json"\|"base64_audio"\|("code","reason")}` |
+| `ws.close` | who closed first (`server`\|`client`\|`eof`), the code and reason, and — when the client closed — whether the door echoed |
+| `ws.accept_ok` | whether `Sec-WebSocket-Accept` was the value RFC 6455 derives from the key |
+| `effects` | usage Δ, metrics Δ, audit Δ, egress — the same closed loop every other driver records |
+
+Everything the client does is **fixed**: RFC 6455 §1.3's own sample nonce for the
+`Sec-WebSocket-Key`, a constant mask, one fixed header order, and a script that is data.
+So the bytes the door receives are a pure function of the cell, and a recording made
+twice from one binary is byte-identical.
+
+The cell:
+
+```json
+{
+  "id": "streams|ws|openai-realtime|/v1/realtime|session-open",
+  "plane": "streams",
+  "driver": "ws",
+  "ws": {
+    "dialect": "openai-realtime",
+    "path": "/v1/realtime?model=m-openai-realtime",
+    "auth": "ok",
+    "headers": {},
+    "timeout_secs": 15,
+    "script": [
+      {"await": {"/type": "session.created"}},
+      {"send": {"type": "response.create"}},
+      {"await": {"/type": "response.done"}}
+    ],
+    "close": {"code": 1000, "reason": ""}
+  },
+  "mock_control": "ws-error"
+}
+```
+
+Script steps: `send` (canonical JSON), `send_text`, `send_binary_base64`, `ping`,
+`await` (an **RFC 6901 pointer** map, this repo's addressing idiom — or the literal
+`"close"`), `await_opcode`, `close`. An `await` the door never satisfies inside
+`timeout_secs` is a **harness failure**, never a recorded outcome: a transcript cut off
+by the recorder's own clock is not what the door did.
+
+**Frame canonicalisation is data, keyed by dialect name** (`normalize.py`'s
+`WS_DIALECTS`, rows for `openai-realtime`, `gemini-live`, `twilio-media`, `echo`).
+Volatile ids are **interned**, not blanked — each distinct value takes the next `<ID:n>`
+in wire order, so `response.text.delta` and `response.done` naming one turn still say so,
+and a door that started *reusing* an id is itself a diff. Audio becomes
+`{"bytes": N, "sha256": …}`. A dialect the table does not know fires `ws.dialect-unknown`
+into `applied`, which is the `norm.rules` diff class — loud, not silently a nonce.
+
+The differ compares the block under its own class, **`ws`**, rated 10 and in
+`MONEY_CLASSES`: a frame that stopped arriving is a turn the caller paid for and did not
+get, and neither that nor a close code moving 1000 → 1011 shows up in `status`.
+
+The mock upstream answers `Upgrade: websocket` on each dialect's realtime path and plays
+a scripted duplex session. Handshake refusals are the ordinary `down`/`401`/`5xx` verbs;
+`cut` kills the socket with no close frame; and the in-session dispute case — the upstream
+that fails *after* the door started billing — is `ws-error` (the dialect's own error
+frame, then 1011) and `ws-close` (1011 with no error frame first).
 
 ### Flags a gate should know about
 
@@ -209,6 +277,8 @@ busbar-oracle merge --selftest         # the merge provenance rule
 busbar-oracle cells --selftest         # the per-family corpus floor, and the reference it is read from
 busbar-oracle rigs-ledger --selftest   # the rig ledger's baseline, floors and refusals
 busbar-oracle capture --selftest       # the effect-delta guards
+busbar-oracle capture-ws --selftest    # the ws driver, against a scripted local server
+python3 "$(python3 -c 'import busbar_oracle,os;print(os.path.dirname(busbar_oracle.__file__))')/wsframe.py"  # the RFC 6455 framing
 bash "$(python3 -c 'import busbar_oracle,os;print(os.path.dirname(busbar_oracle.__file__))')/oracle-config.sh" --selftest
 ```
 
@@ -218,6 +288,13 @@ case, so several of them assert on a non-empty input set before they assert anyt
 
 These run against the tiny fixture product in `tests/fixture-product/` and need no
 real binary, so the tool is testable in this repository alone.
+
+Beside them, `pytest tests` runs the **driver unit tests** — one named assertion per
+behaviour, so a regression names which behaviour broke rather than a count. They need
+`pytest` (pinned in `requirements-dev.txt`) and nothing else: the WebSocket peers they
+drive are built out of `wsframe.py` itself and stdlib sockets, on ephemeral ports. There
+is deliberately **no `websockets` dependency** — a library that coalesces fragments or
+answers pings on your behalf cannot be used to prove that this recorder does not.
 
 `apply-mutation --selftest` is the one that needs **PyYAML** — a boot mutation is
 applied to the parsed config document. It is pinned in `requirements-dev.txt` and

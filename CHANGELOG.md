@@ -4,6 +4,131 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.12
+
+A whole plane the recorder could not reach. VT-6 measured it against the pinned `v0.3.11`: the
+drivers were `llm | http | script | concurrent | exec`, `mock-upstream.py` had **zero** `Upgrade`
+handling, and `capture.py`/`normalize.py` had no notion of a frame, a handshake or a close code. So
+the streams plane's served sessions — openai-realtime, gemini-live, twilio media streams, the
+browser sideband leg — were unrecordable **from anything**, and the golden's zero `^voice` rows
+could only say so. This release is the tool half of that gap. The product half (a binary that serves
+a socket at all) is not this repository's.
+
+Three things, and none of them is useful without the other two.
+
+* **A `ws` recorder driver** (`capture-ws.py`, `wsframe.py`; `record.sh`'s `record_ws_cell`).
+  It opens a WebSocket against the door, drives a scripted client, and records the handshake
+  (status and headers — or, on a refused upgrade, the whole ordinary HTTP response, body and all),
+  every frame in wire order **in both directions**, the close code, reason and who closed first,
+  whether `Sec-WebSocket-Accept` was the value RFC 6455 derives from the key, and the same usage /
+  metrics / audit / egress deltas every other driver records — through `capture.py`'s own helpers,
+  so a ws cell's `effects` cannot drift from an http cell's.
+
+  Everything the client does is **fixed**: RFC 6455 §1.3's own sample nonce for the key, a constant
+  mask, one fixed header order, a script that is data. The bytes the door receives are a pure
+  function of the cell, which is the only thing that lets a second recording be a diff rather than
+  a nonce. The framing is `wsframe.py` — about two hundred lines against the RFC — and not a
+  package: `pyproject`'s `dependencies = []` is what lets the oracle judge a workspace it shares
+  nothing with, and a WebSocket library is exactly the wrong thing to break it for, because one
+  that coalesces fragments, answers pings for you, or picks a random key per connection has already
+  decided what a frame is before the recorder sees it.
+
+  A script step is `send` / `send_text` / `send_binary_base64` / `ping` / `await` / `await_opcode` /
+  `close`. `await` addresses frames by **RFC 6901 pointer** — this repository's existing addressing
+  idiom, the same one 0.3.10's pointer builder and resolver are held to — so a cell says
+  `{"/type": "response.done"}` or `{"/serverContent/turnComplete": true}` and no dialect name
+  appears in the driver. An `await` the door never satisfies inside `timeout_secs` is a **harness
+  failure**, never a recorded outcome: a transcript cut off by the recorder's own clock is not what
+  the door did, and freezing it into a golden would make every later binary reproduce this
+  harness's timeout and call it a pass.
+
+* **A WebSocket mock upstream.** A GET carrying `Upgrade: websocket` on a dialect's realtime path
+  completes the handshake and plays a fixed, scripted duplex session. A session is not a
+  request/response pair, so it cannot be a pure function of one request; it is a pure function of
+  the **client's frame sequence** instead — fixed ids, the same 11-in/7-out usage every other
+  dialect draws, event ids counted from 1 per session, no clocks.
+
+  The dialect is a **table**, never a branch: how a path selects it, which key names the event, how
+  a server frame is stamped, what is sent on open, what each client event is answered with, and how
+  that dialect says "error" are all one row, and the session loop knows nothing about OpenAI or
+  Google.
+
+  The verbs are the existing ones, plus two. A handshake refusal is the ordinary `down` / `401` /
+  `5xx` — an upgrade is a GET and gets that status. `cut` kills the socket after the open frames
+  with no close frame at all. And the **dispute case** — the upstream that dies *after* the door has
+  accepted the session and started billing — needs the upstream to say so *in band*, which no status
+  code can: `ws-error` answers the first client event, then sends the dialect's own error shape and
+  closes 1011; `ws-close` closes 1011 with no error frame first. Both are chosen through the
+  existing control file, out of band, so busbar's own frames stay byte-identical to the healthy
+  session the recording is compared against.
+
+* **Per-dialect frame canonicalisation** (`normalize.py`'s `WS_DIALECTS`; rows for
+  `openai-realtime`, `gemini-live`, `twilio-media` and `echo`). Without it the first two are
+  unusable: every real dialect stamps its frames with values that are new on every run — a fresh
+  `event_id` per Realtime event, `response_id`/`item_id` minted per turn, a `streamSid` and a
+  millisecond `timestamp` on every Twilio media message — so a session recorded raw can never be
+  reproduced, and therefore can never be a diff.
+
+  The canonicaliser is **data, keyed by dialect name**. There is no `if dialect == "openai"` in
+  neutral code; adding a dialect is adding a row, the same shape the mock uses for the other end of
+  the same socket. A dialect the table does not know fires `ws.dialect-unknown` into `applied`,
+  which is itself the `norm.rules` diff class — loud, rather than quietly a nonce.
+
+  Ids are **interned, not blanked**. One `<ID>` for everything would throw away what a transcript is
+  for: `response.text.delta` and `response.done` naming the *same* response is how a reader knows
+  they are one turn, and two turns interleaved on one socket is a real bug a single placeholder
+  would hide. Each distinct value takes the next `<ID:n>` in wire order, across every id key and
+  pointer at once — so the correlation survives, the nonce does not, and a door that started
+  *reusing* an id is itself a diff.
+
+  Audio becomes **length and digest**. Tens of kilobytes of base64 make a golden unreviewable, and
+  dropping it would let a door that sent silence, or truncated a turn, record identically to one
+  that did not; `{"bytes": N, "sha256": …}` keeps the two facts that are a contract. Neutral for
+  binary frames — a binary frame on a realtime session is audio by construction — while *which text
+  keys* carry it is the dialect's business, which is why `delta` is listed per event: it is a
+  transcript on `response.text.delta` and base64 PCM on `response.audio.delta`.
+
+**And the differ had to learn the block.** `compare` walks `status`, `headers`, `body` and the
+`effects` keys; a ws cell's whole contract is a top-level `ws` block, so without a class of its own
+a candidate could drop half its frames, reorder the transcript, flip a frame's direction, close 1011
+where the golden closed 1000, or answer in a different dialect entirely, and the row would still
+print `PASS  identical` — the same hole the `effects.script` sweep was added to close, one level up.
+The new class is **`ws`**, rated 10 and in `MONEY_CLASSES`, for the reason `effects.egress` is: a
+frame that stopped arriving is a turn the caller paid for and did not get, and neither that nor a
+moved close code shows up in `status`, because the handshake was a 101 either way. `ws_diff` leads
+with the session-level facts, then the first index at which the ordered frames part company, with
+the frame **count** first when it moved — a frame missing near the front shifts every frame after
+it, and a raw list diff would print the whole tail of the session.
+
+`streams` joins `llm`/`core`/`all` as a plane `record.sh` records natively.
+
+Four things found by the new tests, all of them in this release rather than after it:
+
+* the driver **never read the close echo**. `send_close` set `closed`, and the wait for the echo was
+  gated on `while not closed`, so it returned immediately and the door's answering close was dropped
+  from every clean transcript — the recorder was losing the last frame of the shutdown it exists to
+  record. `ws.close.echo` now says which of `close`/`eof`/`none` happened, so a door that *stops*
+  echoing is a diff on a key rather than a silently shorter frame list.
+* `await` matches by RFC 6901 pointer and so can only ever match a **text** frame; a cell whose
+  subject is the door streaming audio *back* had nothing to point at. New step: `await_opcode`.
+* normalizing a ws cell **twice** corrupted the audio digest — fed its own output, the walk saw
+  `{"bytes": N, "sha256": "<64 hex>"}` as an ordinary dict and the generic `<HASH>` rule ate the
+  digest. `renormalize.sh` re-runs from `raw/captured.json` and so does not hit it today, but
+  "faithful only as long as nobody feeds it a cell" is not a property worth having.
+* `renormalize.sh` **refused every ws cell**: its table names the normalize.py call sites
+  `record.sh` has, and there are now five. The ws row is `--key-id` alone — and deliberately no
+  `--driver` flag anywhere, because the frame canonicaliser is chosen by the recording's own
+  `ws.dialect`, which travels inside `captured.json`. So a ws cell is re-derived years later without
+  a driver table that could have drifted, and can never be re-normalized under a dialect other than
+  the one it was recorded in.
+
+`tests/` gains **130 unit tests** (`pytest tests`), per driver, driving the real shipped mock in a
+subprocess with the real driver rather than two test doubles agreeing with each other. Every server
+they start binds an **ephemeral** port. The ten `ws`-class differ tests were run against the
+pre-change `diff-cells.py` and all ten fail there. `pytest` is pinned in `requirements-dev.txt` by
+version and digest, with its transitive pins; there is still **no runtime dependency**, and
+deliberately no `websockets`.
+
 ## 0.3.11
 
 Two seams the 0.3.10 release closed in behaviour but did not STATE, and one door that could not
