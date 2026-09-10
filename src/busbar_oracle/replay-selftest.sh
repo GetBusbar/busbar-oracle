@@ -1122,6 +1122,78 @@ grep -q "not a string leaf" "$W/out-vv5b.log" && msg_ok=1 || msg_ok=0
   && say PASS "an escaped pointer that still resolves nowhere is refused at load, exactly as before" \
   || say FAIL "VV-5b unresolvable escaped pointer was NOT refused: rc=$rc msg_ok=$msg_ok (see $W/out-vv5b.log)"
 
+# (vv5c) THE BUILDER AND THE RESOLVER ARE HELD TO THE SAME STANDARD, NOT TO EACH OTHER'S HABITS
+# (0.3.11). vv5/vv5b prove the pointer through a whole replay, which is the right level for "can the
+# register name this leaf" — but neither states the property that makes the pointer trustworthy, and a
+# property nobody states is a property the next edit can break in one half. The defect this closes was
+# exactly that: `additive_superset` joined segments with `/` and `resolve_json_pointer` split them on
+# `/` — two halves of one convention that agreed on every easy key and disagreed on every key that IS
+# a URL, so the largest document busbar records had no addressable leaf at all, and the failure
+# surfaced as an entry refused at load rather than as anything naming a pointer.
+#
+# So the seam is asserted directly, on the real key, in both directions:
+#   (a) escape/unescape ROUND-TRIPS on `/api/v1/admin/overlay/{section}` — slashes AND a `{}` template
+#       segment, the shape an OpenAPI `paths` key actually has — and on the adversarial keys whose
+#       meaning the ORDER of the two substitutions decides (`~`, a literal `~1`, `~0`);
+#   (b) the pointer the BUILDER emits for that key is the pointer the RESOLVER resolves, to the same
+#       leaf, with nothing passed between them but the standard — and the old `/`-join spelling
+#       resolves NOWHERE, so the two conventions are not quietly both accepted;
+#   (c) THE BYTE-IDENTITY PROMISE: a reference token with neither `/` nor `~` escapes to ITSELF. That
+#       is what makes this release safe for every pointer already written in a consuming product's
+#       register — none of them changes meaning, because no segment of any of them holds either
+#       character. Asserted over every key in this tree's own fixture recording, not over a sample.
+if python3 - <<PYPTR >"$W/ptr-roundtrip.log" 2>&1
+import importlib.util, json, os
+spec = importlib.util.spec_from_file_location("dc", "${here}/diff-cells.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+# (a) round-trip, on the real shape and on the keys the substitution ORDER decides
+for k in ("/api/v1/admin/overlay/{section}", "~", "~1", "~0", "a~1b/c", "plain", "", "/"):
+    esc = m.ptr_escape(k)
+    back = m.ptr_unescape(esc)
+    assert back == k, f"round-trip lost {k!r}: escaped {esc!r} came back {back!r}"
+assert m.ptr_escape("/api/v1/admin/overlay/{section}") == "~1api~1v1~1admin~1overlay~1{section}", "not RFC 6901"
+assert "/" not in m.ptr_escape("/api/v1/admin/overlay/{section}"), "an escaped token can still forge a separator"
+
+# (b) what the BUILDER emits is what the RESOLVER resolves, on a real OpenAPI shape
+url = "/api/v1/admin/overlay/{section}"
+golden = {"paths": {url: {"delete": {"responses": {"409": {"description": "G"}}}}}}
+cand = {"paths": {url: {"delete": {"responses": {"409": {"description": "C"}}}}}}
+diffs, report = [], []
+bad = m.additive_superset(golden, cand, "", set(), diffs, [], report)
+assert bad is None and len(diffs) == 1, f"expected one deferred string leaf, got bad={bad!r} diffs={diffs!r}"
+built = diffs[0][0]
+assert built == "/paths/~1api~1v1~1admin~1overlay~1{section}/delete/responses/409/description", built
+found, val = m.resolve_json_pointer(golden, built)
+assert found and val == "G", f"the resolver did not reach the leaf the builder named: {found} {val!r}"
+assert m.resolve_json_pointer(golden, "/paths/" + url + "/delete/responses/409/description")[0] is False, \
+    "the pre-0.3.10 /-join spelling still resolves, so both conventions are live at once"
+
+# (c) a token with neither / nor ~ escapes to itself — over every key in this tree's own fixture
+seen = 0
+def walk(doc):
+    global seen
+    if isinstance(doc, dict):
+        for k, v in doc.items():
+            if "/" not in k and "~" not in k:
+                assert m.ptr_escape(k) == k, f"key {k!r} moved"
+                seen += 1
+            walk(v)
+    elif isinstance(doc, list):
+        for v in doc:
+            walk(v)
+fixdir = os.path.join("${here}", "fixtures", "selftest-recording", "cells")
+for name in sorted(os.listdir(fixdir)):
+    walk(json.load(open(os.path.join(fixdir, name), encoding="utf-8")))
+assert seen > 0, "the byte-identity property was asserted over nothing"
+print(f"ok ({seen} keys unchanged)")
+PYPTR
+then
+  say PASS "the pointer builder and resolver agree on RFC 6901 — a 'paths' key round-trips, and every slash-free key escapes to itself ($(cat "$W/ptr-roundtrip.log"))"
+else
+  say FAIL "VV-5c the pointer seam is not RFC 6901 in both directions: $(tail -3 "$W/ptr-roundtrip.log" | tr '\n' ' ')"
+fi
+
 # (tt) `description_corrections` — A NAMED LEAF MAY DIFFER OUTRIGHT, NO GROWTH PROOF NEEDED, BECAUSE
 # THE REGISTER SAYS SO EXPLICITLY. Unlike `text_list_growth` (which proves growth mechanically),
 # this is a declared factual correction to 1.5.5's prose: the entry names the exact JSON pointer,
