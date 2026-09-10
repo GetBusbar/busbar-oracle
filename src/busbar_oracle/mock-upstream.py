@@ -38,6 +38,18 @@ Outcome controls (the recorder sets them per cell):
   body    {"stream": true} (openai/anthropic/cohere) or the *stream* path (gemini/bedrock)
                                     -> a fixed SSE / streamed sequence in that dialect
 
+WebSocket upstreams (0.3.12): a GET carrying `Upgrade: websocket` on a dialect's realtime path
+completes the RFC 6455 handshake and then plays a fixed, scripted duplex session — see WS_DIALECTS:
+
+  openai-realtime   GET /v1/realtime?model=<model>
+  gemini-live       GET /ws/google.ai.generativelanguage.<ver>.GenerativeService.BidiGenerateContent
+  echo              GET /ws/echo   (every frame straight back; the recorder's own tests)
+
+The ordinary verbs refuse the HANDSHAKE (`down` 503, `401`, `5xx`) or kill the socket after the open
+frames (`cut`); two more are the in-session dispute case, chosen out of band like every other verb:
+  ws-error  answer the first client event, then the dialect's own error frame, then close 1011
+  ws-close  answer the first client event, then close 1011 with no error frame first
+
 Usage: mock-upstream.py <port> [marker] [control-file]
 
 <control-file> is the third positional every caller in this tree actually passes (record.sh and the
@@ -80,7 +92,7 @@ _capture_seq = itertools.count()
 # control that resolves to none of them is refused rather than served healthy -- a mock that quietly
 # ignores the outage a cell ordered records the SUCCESS path under that cell's name, identically on
 # the golden and the candidate, so the cell proves the opposite of what it claims.
-VERBS = frozenset({"down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation"})
+VERBS = frozenset({"down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation", "ws-error", "ws-close"})
 
 
 class UnresolvableControl(Exception):
@@ -382,6 +394,174 @@ def bedrock_stream_error(model, marker):
             + exception_frame("internalServerException", j({"message": ERR_MSG})))
 
 
+# ── WebSocket upstreams: a DUPLEX session, scripted per dialect, driven by the same control file ──
+# The streams plane's served sessions (openai-realtime, gemini-live, the browser sideband leg) are
+# WebSocket sessions to an upstream, and until 0.3.12 this mock had zero `Upgrade` handling: the
+# whole family was unrecordable, and the golden's zero `^voice` rows could only say so. A session is
+# not a request/response pair, so the mock cannot be a pure function of ONE request; it is a pure
+# function of the CLIENT'S FRAME SEQUENCE instead — fixed ids, fixed usage (the same 11 in / 7 out),
+# the same marker text, event ids counted from 1 per session, no clocks — so a recorder that sends
+# the same frames gets the same frames back, byte for byte, on every run.
+#
+# THE DIALECT IS A TABLE, NEVER A BRANCH. Every wire shape this mock knows is a row in WS_DIALECTS:
+# how a path selects it, which key names the event, how a server frame is stamped, what is sent on
+# open, what each client event is answered with, and how the dialect says "error". The session loop
+# below reads the row and knows nothing about OpenAI or Google; adding a dialect is adding a row.
+#
+# THE VERBS ARE THE EXISTING ONES, PLUS TWO. A handshake refusal is the ordinary `down`/`401`/`5xx`
+# (the upgrade is a GET like any other and gets that status). `cut` kills the socket after the open
+# frames with no close frame at all. And the dispute case — the upstream that dies AFTER the door has
+# accepted the session and started billing — needs the upstream to say so IN BAND, which no status
+# code can: `ws-error` answers the first client event, then sends the dialect's own error shape and
+# closes 1011; `ws-close` closes 1011 with no error frame first. Both chosen through the control file
+# out of band, so busbar's own frames stay byte-identical to the healthy session they are compared to.
+#
+# Egress: the handshake is captured like any other upstream request (method GET, the upgrade
+# headers, an empty body), and when the session ends the record gains `ws`: every frame busbar SENT
+# in order (the money-shaped half: the prompt, the audio, the session config), the dialect that
+# served it, and how the session closed — under the same `response` stamp every other egress record
+# carries, so record.sh's egress_settle sees a settled record.
+import hashlib  # noqa: E402
+import socket  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wsframe  # noqa: E402
+
+WS_CLOSE_MSG = "oracle: upstream closed mid-session"
+
+
+def _oai_session(model):
+    return {"id": "sess_oracle", "object": "realtime.session", "model": model, "modalities": ["text"],
+            "instructions": "", "voice": "alloy", "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16", "turn_detection": None, "tools": [], "tool_choice": "auto",
+            "temperature": 0.8, "max_response_output_tokens": "inf"}
+
+
+def _oai_response(model, marker, status):
+    out = [] if status == "in_progress" else [
+        {"id": "item_oracle", "object": "realtime.item", "type": "message", "status": "completed",
+         "role": "assistant", "content": [{"type": "text", "text": marker}]}]
+    r = {"id": "resp_oracle", "object": "realtime.response", "status": status, "output": out}
+    if status == "completed":
+        r["usage"] = {"total_tokens": IN_TOK + OUT_TOK, "input_tokens": IN_TOK, "output_tokens": OUT_TOK,
+                      "input_token_details": {"cached_tokens": 0, "text_tokens": IN_TOK, "audio_tokens": 0},
+                      "output_token_details": {"text_tokens": OUT_TOK, "audio_tokens": 0}}
+    return r
+
+
+def _oai_session_update(ev, model, marker):
+    s = _oai_session(model)
+    if isinstance(ev.get("session"), dict):
+        s.update(ev["session"])
+    return [{"type": "session.updated", "session": s}]
+
+
+def _oai_response_create(ev, model, marker):
+    return [
+        {"type": "response.created", "response": _oai_response(model, marker, "in_progress")},
+        {"type": "response.output_item.added", "response_id": "resp_oracle", "output_index": 0,
+         "item": {"id": "item_oracle", "object": "realtime.item", "type": "message", "status": "in_progress",
+                  "role": "assistant", "content": []}},
+        {"type": "response.text.delta", "response_id": "resp_oracle", "item_id": "item_oracle",
+         "output_index": 0, "content_index": 0, "delta": marker},
+        {"type": "response.text.done", "response_id": "resp_oracle", "item_id": "item_oracle",
+         "output_index": 0, "content_index": 0, "text": marker},
+        {"type": "response.output_item.done", "response_id": "resp_oracle", "output_index": 0,
+         "item": {"id": "item_oracle", "object": "realtime.item", "type": "message", "status": "completed",
+                  "role": "assistant", "content": [{"type": "text", "text": marker}]}},
+        {"type": "response.done", "response": _oai_response(model, marker, "completed")},
+    ]
+
+
+def _oai_error(code, message):
+    return {"type": "error", "error": {"type": "invalid_request_error" if code else "server_error",
+                                       "code": code, "message": message, "param": None, "event_id": None}}
+
+
+def _gem_content(ev, model, marker):
+    return [
+        {"serverContent": {"modelTurn": {"role": "model", "parts": [{"text": marker}]}}},
+        {"serverContent": {"turnComplete": True},
+         "usageMetadata": {"promptTokenCount": IN_TOK, "responseTokenCount": OUT_TOK,
+                           "totalTokenCount": IN_TOK + OUT_TOK}},
+    ]
+
+
+WS_DIALECTS = {
+    # OpenAI Realtime: wss://api.openai.com/v1/realtime?model=… ; every server event carries a
+    # fresh `event_id`, the first is `session.created`, an unknown client event is answered with an
+    # in-band `error` event and the session stays open.
+    "openai-realtime": {
+        "match": lambda p: p == "/v1/realtime",
+        "event_key": "type",
+        "stamp": lambda ev, n: {"event_id": f"event_oracle_{n:04d}", **ev},
+        "on_open": lambda model, marker: [{"type": "session.created", "session": _oai_session(model)}],
+        "on_event": {
+            "session.update": _oai_session_update,
+            "response.create": _oai_response_create,
+            "input_audio_buffer.append": lambda ev, model, marker: [],
+            "input_audio_buffer.commit": lambda ev, model, marker: [
+                {"type": "input_audio_buffer.committed", "previous_item_id": None, "item_id": "item_oracle_in"}],
+            "conversation.item.create": lambda ev, model, marker: [
+                {"type": "conversation.item.created", "previous_item_id": None,
+                 "item": {**(ev.get("item") or {}), "id": "item_oracle_in", "object": "realtime.item"}}],
+        },
+        "unknown": lambda ev, model, marker: [
+            _oai_error("unknown_parameter", f"oracle: unknown client event {ev.get('type')!r}")],
+        # the dispute arm: how THIS dialect says it failed mid-session — an `error` event, then 1011
+        "error": lambda model, marker: [_oai_error(None, ERR_MSG)],
+    },
+    # Gemini Live: wss://…/ws/google.ai.generativelanguage.<ver>.GenerativeService.BidiGenerateContent
+    # Nothing is sent on open; the client's `setup` is answered with `setupComplete`; there are no
+    # event ids; an error is a CLOSE with a reason, never an in-band frame.
+    "gemini-live": {
+        "match": lambda p: p.startswith("/ws/google.ai.generativelanguage.") and p.endswith(".GenerativeService.BidiGenerateContent"),
+        "event_key": None,  # the event is the one top-level key
+        "stamp": lambda ev, n: ev,
+        "on_open": lambda model, marker: [],
+        "on_event": {
+            "setup": lambda ev, model, marker: [{"setupComplete": {}}],
+            "clientContent": _gem_content,
+            "realtimeInput": lambda ev, model, marker: [],
+        },
+        "unknown": lambda ev, model, marker: [("close", 1008, f"oracle: unknown client message {sorted(ev)!r}")],
+        "error": lambda model, marker: [],
+    },
+    # A dialect-free echo: every text/binary frame comes straight back. For the recorder's own
+    # tests, and for a cell whose subject is the door's framing rather than any provider's grammar.
+    "echo": {
+        "match": lambda p: p == "/ws/echo",
+        "event_key": None,
+        "stamp": lambda ev, n: ev,
+        "on_open": lambda model, marker: [],
+        "on_event": {},
+        "unknown": lambda ev, model, marker: [ev],
+        "error": lambda model, marker: [{"error": ERR_MSG}],
+    },
+}
+
+
+def ws_dialect_for(path):
+    for name, d in WS_DIALECTS.items():
+        if d["match"](path):
+            return name, d
+    return None, None
+
+
+def ws_event_name(d, ev):
+    if not isinstance(ev, dict):
+        return None
+    k = d["event_key"]
+    if k:
+        return ev.get(k)
+    return next(iter(ev), None) if len(ev) == 1 else None
+
+
+def _b64(b):
+    import base64
+    return base64.b64encode(b).decode()
+
+
 class H(BaseHTTPRequestHandler):
     server_version = "oracle-upstream/1"
     sys_version = ""
@@ -476,9 +656,197 @@ class H(BaseHTTPRequestHandler):
             json.dump(self._eg_record, f, separators=(",", ":"), sort_keys=True)
         os.replace(tmp_path, self._eg_path)
 
+    def _resolve_control(self, model):
+        """The verb for this request: the X-Oracle-Upstream header, or the control FILE the recorder
+        writes per cell (see do_POST for why an empty read holds the last verb and a well-formed
+        control this mock cannot act on is an error). Returns (verb, harness_error_or_None).
+
+        THIS DUPLICATES do_POST'S CONTROL BLOCK, AND THAT IS DELIBERATE. The two are semantically
+        identical and the obvious move is to fold do_POST into this. It is not made: do_POST is the
+        path every cell in the existing golden was recorded through, and the oracle's whole value is
+        that a cell recorded a year ago is judged today by the same code that recorded it. A
+        refactor here could only be argued to be safe -- it could not be PROVEN so against a corpus
+        recorded before it -- and a difference it introduced would show up as a difference in the
+        PRODUCT. So the new surface carries its own copy and this comment; if the control semantics
+        ever change, both change, and the tests below hold them equal."""
+        ctl = (self.headers.get("X-Oracle-Upstream") or "").strip().lower()
+        ctl_file = self.server.control_file  # type: ignore[attr-defined]
+        if not ctl_file:
+            return ctl, None
+        if not os.path.exists(ctl_file):
+            with self.server.control_lock:  # type: ignore[attr-defined]
+                self.server.last_raw = None  # type: ignore[attr-defined]
+            return "", None
+        raw_ctl = self._read_control_file()
+        if raw_ctl:
+            try:
+                ctl = self._verb_for_model(raw_ctl, model)
+            except UnresolvableControl as e:
+                sys.stderr.write(f"[control] UNRESOLVABLE control for model {model!r}: {e}\n")
+                sys.stderr.flush()
+                return "", str(e)
+            except ValueError:
+                raw_ctl = None
+            else:
+                with self.server.control_lock:  # type: ignore[attr-defined]
+                    self.server.last_raw = raw_ctl  # type: ignore[attr-defined]
+                return ctl, None
+        with self.server.control_lock:  # type: ignore[attr-defined]
+            last_raw = self.server.last_raw  # type: ignore[attr-defined]
+        try:
+            ctl = self._verb_for_model(last_raw, model) if last_raw else ""
+        except (ValueError, UnresolvableControl):
+            ctl = ""
+        sys.stderr.write(
+            f"[control] empty/unreadable/malformed read on {ctl_file} for model {model!r}; "
+            f"holding last verb (raw={last_raw!r}) -> {ctl!r}\n")
+        sys.stderr.flush()
+        return ctl, None
+
+    def _serve_ws(self, p, name, d):
+        """One WebSocket session on this connection, from the upgrade to the close, scripted by the
+        dialect row `d`. Records the session into this request's egress record."""
+        self._capture_egress("GET", self.path, b"")
+        qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+        model = next((unquote(v) for k, _, v in (kv.partition("=") for kv in qs.split("&")) if k == "model"), None) \
+            or "oracle-model"
+        ctl, harness_err = self._resolve_control(model)
+        if harness_err:
+            return self._send(599, j({"error": {"type": "oracle_harness_error", "message": f"oracle mock: {harness_err}"}}))
+        # a handshake refusal is the ordinary status the verb names — the upgrade is a GET like any
+        if ctl == "down":
+            return self._send(503, j({"error": {"type": "upstream_unavailable", "message": "oracle: upstream down"}}))
+        if ctl == "5xx":
+            return self._send(500, j({"error": {"type": "server_error", "message": "oracle: upstream exploded"}}))
+        if ctl == "401":
+            return self._send(401, j({"error": {"type": "authentication_error", "message": "oracle: upstream rejected the credential"}}))
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or (self.headers.get("Sec-WebSocket-Version") or "").strip() != "13":
+            return self._send(400, j({"error": {"type": "invalid_request_error",
+                                                "message": "oracle mock: a websocket upgrade needs Sec-WebSocket-Key and Sec-WebSocket-Version: 13"}}))
+        if ctl == "slow":
+            time.sleep(float(os.environ.get("ORACLE_MOCK_SLOW_SECS", "8")))
+        self.send_response_only(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", wsframe.accept_key(key))
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        sock = self.connection
+        sock.settimeout(float(os.environ.get("ORACLE_MOCK_WS_IDLE_SECS", "30")))
+        marker = self.server.marker  # type: ignore[attr-defined]
+        received = []
+        seq = itertools.count(1)
+        close = {"by": "none", "code": None, "reason": ""}
+
+        def send_ev(ev):
+            if isinstance(ev, tuple) and ev[0] == "close":
+                return send_close(ev[1], ev[2])
+            sock.sendall(wsframe.encode_frame(wsframe.OP_TEXT, j(d["stamp"](ev, next(seq)))))
+            return False
+
+        def send_close(code, reason):
+            sock.sendall(wsframe.encode_close(code, reason))
+            close.update({"by": "server", "code": code, "reason": reason})
+            # wait for the client's close echo (or its silence) so the record says which
+            try:
+                while True:
+                    op, payload = wsframe.recv_message(sock)
+                    if op == wsframe.OP_CLOSE:
+                        c, r = wsframe.decode_close(payload)
+                        received.append({"opcode": "close", "code": c, "reason": r})
+                        break
+                    received.append(_ws_record(op, payload))
+            except (EOFError, OSError, ValueError):
+                pass
+            return True
+
+        def _ws_record(op, payload):
+            if op == wsframe.OP_TEXT:
+                return {"opcode": "text", "text": payload.decode("utf-8", "replace")}
+            if op == wsframe.OP_BINARY:
+                return {"opcode": "binary", "len": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+            return {"opcode": wsframe.OPCODE_NAMES.get(op, str(op)), "base64": _b64(payload)}
+
+        try:
+            for ev in d["on_open"](model, marker):
+                send_ev(ev)
+            if ctl == "cut":
+                # the socket dies with no close frame: the "upstream vanished mid-session" arm
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            else:
+                answered = 0
+                while True:
+                    try:
+                        op, payload = wsframe.recv_message(sock)
+                    except EOFError:
+                        close.update({"by": "eof"}); break
+                    except socket.timeout:
+                        close.update({"by": "idle"})
+                        try:
+                            sock.sendall(wsframe.encode_close(1001, "oracle: idle"))
+                        except OSError:
+                            pass
+                        break
+                    if op == wsframe.OP_CLOSE:
+                        c, r = wsframe.decode_close(payload)
+                        received.append({"opcode": "close", "code": c, "reason": r})
+                        close.update({"by": "client", "code": c, "reason": r})
+                        sock.sendall(wsframe.encode_close(c, "") if c is not None else wsframe.encode_close(None))
+                        break
+                    if op == wsframe.OP_PING:
+                        received.append(_ws_record(op, payload))
+                        sock.sendall(wsframe.encode_frame(wsframe.OP_PONG, payload)); continue
+                    if op == wsframe.OP_PONG:
+                        received.append(_ws_record(op, payload)); continue
+                    received.append(_ws_record(op, payload))
+                    replies = []
+                    if op == wsframe.OP_TEXT:
+                        try:
+                            ev = json.loads(payload.decode("utf-8"))
+                        except ValueError:
+                            ev = None
+                        handler = d["on_event"].get(ws_event_name(d, ev)) if isinstance(ev, dict) else None
+                        replies = handler(ev, model, marker) if handler else d["unknown"](ev, model, marker)
+                    closed = False
+                    for r in replies:
+                        if send_ev(r):
+                            closed = True; break
+                    if closed:
+                        break
+                    answered += 1
+                    if answered == 1 and ctl in ("ws-error", "ws-close"):
+                        # THE DISPUTE CASE: the door has accepted the session and served one turn,
+                        # and now the upstream fails in band — after the bill has started
+                        if ctl == "ws-error":
+                            for r in d["error"](model, marker):
+                                send_ev(r)
+                        send_close(1011, ERR_MSG if ctl == "ws-error" else WS_CLOSE_MSG)
+                        break
+        except OSError as e:
+            close.update({"by": "error", "reason": str(e)})
+        finally:
+            if getattr(self, "_eg_record", None) is not None:
+                self._eg_record["ws"] = {"dialect": name, "received": received, "close": close}
+            self._egress_response(101)
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     def do_GET(self):
-        # Readiness only (fleet-fixtures wait_for_http probes with GET /). Every dialect is POST.
-        p = self.path.split("?", 1)[0]
+        # Readiness only (fleet-fixtures wait_for_http probes with GET /). Every dialect is POST —
+        # except a WebSocket upgrade, which is a GET that turns into a session (see _serve_ws).
+        p = unquote(self.path.split("?", 1)[0])
+        if (self.headers.get("Upgrade") or "").strip().lower() == "websocket":
+            name, d = ws_dialect_for(p)
+            if d is None:
+                return self._send(404, j({"error": f"oracle mock: no websocket dialect for path {p}"}))
+            return self._serve_ws(p, name, d)
         if p == "/":
             return self._send(200, j({"ok": True, "mock": "oracle-upstream"}))
         if p == "/__control":
