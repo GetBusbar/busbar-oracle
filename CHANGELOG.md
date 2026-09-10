@@ -4,6 +4,48 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.11
+
+Two seams the 0.3.10 release closed in behaviour but did not STATE, and one door that could not
+record the fault it is named for.
+
+- **The pointer builder and the resolver are held to RFC 6901 directly, not to each other's habits.**
+  0.3.10 made `additive_superset` escape and `resolve_json_pointer` unescape, and proved it through a
+  whole replay — the right level for "can the register name this leaf", but not a statement of the
+  property that makes the pointer trustworthy, and a property nobody states is one the next edit can
+  break in a single half. That is precisely how the original defect arose: a `/`-join on one side and
+  a `/`-split on the other, two halves of one convention that agreed on every key without a slash and
+  disagreed on every key that IS a URL. `replay-selftest` now asserts the seam itself — the real
+  `paths` key `/api/v1/admin/overlay/{section}` (slashes AND a `{}` template segment) round-trips;
+  the adversarial keys whose meaning the substitution ORDER decides (`~`, a literal `~1`, `~0`)
+  round-trip; the pointer the BUILDER emits for that key is the one the RESOLVER resolves, to the
+  same leaf, with nothing passed between them but the standard; the pre-0.3.10 `/`-join spelling
+  resolves NOWHERE, so the two conventions are not quietly both live; and a reference token with
+  neither `/` nor `~` escapes to ITSELF, asserted over every key in the shipped fixture recording
+  rather than over a sample. That last case is the one a consuming product's existing register rests
+  on: no pointer already written changes meaning, because no segment of any of them holds either
+  character.
+
+- **`/v1/responses` streams on the FAULT verbs, so a `cut` on that door has a stream to cut.** The
+  mock answered this path BUFFERED whatever `stream` said, so a `cut` sliced a JSON object in half
+  (`_send`'s cut arm splits on the SSE frame boundary and falls back to half the bytes when there is
+  none) — a shape no upstream produces, and one that cannot record what a door does when a real
+  stream dies after its first frame. There is now a `response.*` stream builder
+  (`response.created` → one `output_text.delta` → `response.completed` carrying the usage), wired to
+  `cut` only. NOT to `stream` itself, and that restraint is the point: six cells are already recorded
+  against this door with `stream: true` in their egress body
+  (`llm|{anthropic,bedrock,cohere,gemini,openai,responses}|responses|request|ok_stream`), every one
+  of them recorded from a PUBLISHED binary against a buffered upstream — a golden is re-made by
+  re-recording that binary, never by the release that changed the judge. So the healthy answer stays
+  byte-identical (asserted) and only the fault verbs, which no existing golden on this door uses,
+  gain frames. Widening it to the ordinary path is a separate change with a re-record attached.
+  `mock-upstream --selftest` drives all of it through a real server on a real socket: the cut answers
+  `text/event-stream`, delivers exactly ONE complete `response.created` frame and never the terminal
+  `response.completed` the usage is read off; the healthy `stream: true` answer is still the buffered
+  object byte for byte; `stream-error` is unchanged.
+
+No verdict moves for any cell that does not order a `cut` on `/v1/responses`.
+
 ## 0.3.10
 
 Two gaps 0.3.9 named as blockers and left open. Both were the TOOL's, not the product's, and both
