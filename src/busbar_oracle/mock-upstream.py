@@ -324,9 +324,34 @@ def cohere_stream_error(model, marker):
     ])
 
 
+def openai_responses_stream(model, marker):
+    """THE RESPONSES DIALECT'S ORDINARY STREAM (0.3.11), in its own `response.*` event vocabulary:
+    `response.created`, one `output_text.delta`, then `response.completed` carrying the usage — the
+    terminal frame a caller reads the billing numbers off, and therefore the frame whose ABSENCE is
+    the whole point of a mid-stream failure cell.
+
+    It exists because `cut` had nothing to cut. `/v1/responses` answered BUFFERED whatever `stream`
+    said, so a `cut` on this door sliced a JSON object in half (`_send` splits on `\n\n` and falls
+    back to half the bytes when there is no frame boundary) — a shape no upstream produces, and one
+    that cannot record what a door does when a real stream dies after its first frame. Wired ONLY to
+    the fault verbs, deliberately: see do_POST."""
+    return sse([
+        {"type": "response.created", "sequence_number": 0,
+         "response": {"id": "resp_oracle", "object": "response", "status": "in_progress", "model": model}},
+        {"type": "response.output_text.delta", "sequence_number": 1, "item_id": "msg_oracle",
+         "output_index": 0, "content_index": 0, "delta": marker},
+        {"type": "response.completed", "sequence_number": 2,
+         "response": {"id": "resp_oracle", "object": "response", "status": "completed", "model": model,
+                      "output": [{"type": "message", "id": "msg_oracle", "role": "assistant",
+                                  "status": "completed",
+                                  "content": [{"type": "output_text", "text": marker,
+                                               "annotations": [], "logprobs": []}]}],
+                      "usage": {"input_tokens": IN_TOK, "output_tokens": OUT_TOK,
+                                "total_tokens": IN_TOK + OUT_TOK}}},
+    ])
+
+
 def responses_stream_error(model, marker):
-    # /v1/responses answers buffered in every other cell; the ONLY streaming it does here is this
-    # failure, so no recorded cell's bytes move by adding it.
     return sse([
         {"type": "response.created", "sequence_number": 0,
          "response": {"id": "resp_oracle", "object": "response", "status": "in_progress", "model": model}},
@@ -640,6 +665,24 @@ class H(BaseHTTPRequestHandler):
         if p == "/v1/responses":
             if want_stream and stream_error:
                 return self._send(200, responses_stream_error(model, marker), "text/event-stream")
+            # A `cut` ON THIS DOOR NEEDS A STREAM TO CUT (0.3.11). Through 0.3.10 `/v1/responses`
+            # answered BUFFERED whatever `stream` said, so `llm.stream|responses|cut` — the cell whose
+            # entire subject is "headers, the first frame, then the socket dies" — recorded half a JSON
+            # object instead of a first SSE frame. The dialect could not record the fault it is named
+            # for, and the two arms of the same failure (`cut` and `stream-error`) disagreed about what
+            # shape the door was even reading.
+            #
+            # WIRED TO THE FAULT VERBS, NOT TO `stream` ITSELF, AND THAT IS THE WHOLE CARE HERE. Six
+            # cells already recorded against this door with `stream: true` in their egress body
+            # (`llm|{anthropic,bedrock,cohere,gemini,openai,responses}|responses|request|ok_stream`),
+            # every one of them recorded from the PUBLISHED 1.5.5 binary against a buffered upstream.
+            # Streaming the healthy path would move all six goldens' bytes, and a golden is re-made
+            # only by re-recording the released binary — never by the release that changed the judge.
+            # So the healthy answer stays byte-identical and only the fault verbs, which no existing
+            # golden on this door uses, gain frames. Widening this to the ordinary path is a separate
+            # change with a re-record attached.
+            if want_stream and self.cut:
+                return self._send(200, openai_responses_stream(model, marker), "text/event-stream")
             if citation:
                 return self._send(200, openai_responses_citation(model, marker))
             return self._send(200, openai_responses(model, marker))
@@ -732,6 +775,71 @@ def selftest() -> int:
     # …and every verb the docstring/dispatch names is in the vocabulary the refusal is judged against
     say(all(x in VERBS for x in ("down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation")),
         "the verb vocabulary covers every verb do_POST dispatches on")
+
+    # ── A `cut` ON /v1/responses CUTS A STREAM, NOT A JSON OBJECT (0.3.11) ────────────────────────
+    # Driven through a REAL server on a real socket, because the thing under test is what a caller
+    # receives: `_send`'s cut arm splits the body on the SSE frame boundary and resets, so "the door
+    # gets a first frame" is a claim about the bytes on the wire, not about a builder's return value.
+    import http.client
+    from http.server import ThreadingHTTPServer as _THS
+
+    srv = _THS(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    srv.marker = MARKER
+    srv.control_file = ""
+    srv.last_raw = None
+    srv.control_lock = threading.Lock()
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    def post(path, body, verb=""):
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+        hdrs = {"Content-Type": "application/json"}
+        if verb:
+            hdrs["X-Oracle-Upstream"] = verb
+        c.request("POST", path, json.dumps(body), hdrs)
+        r = c.getresponse()
+        try:
+            got = r.read()
+        except http.client.IncompleteRead as e:
+            # THE FAULT ITSELF. `_send`'s cut arm announces the WHOLE body's Content-Length and then
+            # resets after the first frame, so a conforming client raises here — which is the point:
+            # a caller that trusted the length got less than it was promised, with no error frame
+            # explaining why. The partial bytes are what the door actually received.
+            got = e.partial
+        out = (r.status, r.getheader("Content-Type"), got)
+        c.close()
+        return out
+
+    try:
+        st, ctype, got = post("/v1/responses", {"model": "m-responses", "stream": True}, "cut")
+        say(st == 200 and ctype == "text/event-stream",
+            "a cut /v1/responses stream answers 200 text/event-stream (it used to answer application/json)")
+        # what the caller got is a WHOLE first frame — a parseable `response.created` — and nothing after it
+        frames = [x for x in got.split(b"\n\n") if x.strip()]
+        first_ok = False
+        if len(frames) == 1 and frames[0].startswith(b"data: "):
+            try:
+                first_ok = json.loads(frames[0][len(b"data: "):])["type"] == "response.created"
+            except (ValueError, KeyError, TypeError):
+                first_ok = False
+        say(first_ok, "…and delivers exactly ONE complete SSE frame (response.created) before the reset")
+        say(b"response.completed" not in got,
+            "…and never the terminal response.completed frame the usage is read off")
+
+        # THE SIX ALREADY-RECORDED GOLDENS DO NOT MOVE. The healthy `stream: true` answer on this door
+        # is byte-identical to what 0.3.10 served: the buffered Response object.
+        st, ctype, got = post("/v1/responses", {"model": "m-responses", "stream": True})
+        say(st == 200 and ctype == "application/json" and got == openai_responses("m-responses", MARKER),
+            "…while the HEALTHY stream:true answer is still the buffered object, byte for byte")
+
+        # …and the in-band failure arm is untouched.
+        st, ctype, got = post("/v1/responses", {"model": "m-responses", "stream": True}, "stream-error")
+        say(st == 200 and ctype == "text/event-stream" and got == responses_stream_error("m-responses", MARKER),
+            "…and stream-error still answers its own in-band error stream, unchanged")
+    finally:
+        srv.shutdown()
+        srv.server_close()
     print(f"\nmock-upstream selftest: {'GREEN' if not fails else f'RED ({fails} failing)'}")
     return 1 if fails else 0
 
