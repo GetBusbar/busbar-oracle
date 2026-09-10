@@ -44,6 +44,11 @@ THE SCRIPT is a list of steps, run in order; a step is one of:
                                    pointer equal to its value (the repo's addressing idiom: `/type`
                                    for an OpenAI event, `/serverContent/turnComplete` for Gemini)
   {"await": "close"}               read frames until the server closes (or the socket dies)
+  {"await_opcode": "binary"}       read frames until one arrives with that opcode ("text", "binary",
+                                   "ping", "pong"). `await` matches by RFC 6901 pointer and so can
+                                   only ever match a TEXT frame; a cell whose subject is the door
+                                   streaming audio BACK has no JSON to point at, and without this
+                                   its only options were to guess a frame count or to close early
   {"close": {"code": N, "reason": "<str>"}}
                                    send a close now (the default, after the last step, is
                                    spec.close or 1000)
@@ -295,6 +300,11 @@ def drive(spec: dict) -> dict:
                 send(wsframe.OP_BINARY, base64.b64decode(step["send_binary_base64"]))
             elif "ping" in step:
                 send(wsframe.OP_PING, base64.b64decode(step["ping"] or ""))
+            elif "await_opcode" in step:
+                name = str(step["await_opcode"])
+                if name not in wsframe.OPCODES_BY_NAME:
+                    raise HarnessError(f"await_opcode names no opcode: {name!r} (known: {sorted(wsframe.OPCODES_BY_NAME)})")
+                await_until(lambda op, p, o=wsframe.OPCODES_BY_NAME[name]: op == o, f"opcode {name}")
             elif "await" in step:
                 want = step["await"]
                 if want == "close":
@@ -361,7 +371,9 @@ def assemble(ws_path: str, before: str, after: str, egress_paths: list) -> dict:
 # ── selftest: a scripted server on a loopback socket, no mock, no busbar ─────────────────────────
 def _serve_once(server_sock, plan):
     """Accept one connection and follow `plan`: a list of ("send", op, payload) | ("close", code,
-    reason) | ("cut",) | ("refuse", status, body) | ("echo",) | ("expect_close",) steps."""
+    reason) | ("cut",) | ("refuse", status, body) | ("echo",) | ("expect_close",) | ("hang", secs)
+    steps. `hang` is a door that answers nothing at all -- the arm that proves a missing close echo
+    is RECORDED (close.echo) rather than raised."""
     conn, _ = server_sock.accept()
     conn.settimeout(5)
     try:
@@ -386,6 +398,8 @@ def _serve_once(server_sock, plan):
                     pass
             elif step[0] == "cut":
                 conn.shutdown(socket.SHUT_RDWR)
+            elif step[0] == "hang":
+                time.sleep(step[1] if len(step) > 1 else 2.0)
             elif step[0] == "echo":
                 op, p = wsframe.recv_message(conn); got.append((op, p))
                 conn.sendall(wsframe.encode_frame(op, p))

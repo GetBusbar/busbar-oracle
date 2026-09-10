@@ -76,6 +76,13 @@ jobs:
         run: busbar-oracle --data tests/fixture-product/data fixture-gate-selftest
       - name: the judge judges itself
         run: busbar-oracle --data tests/fixture-product/data replay-selftest
+      # THE DRIVER UNIT TESTS. The `--selftest` steps above are what a maintainer runs on a machine
+      # with nothing installed, and they stay; these are the thing a --selftest cannot do well --
+      # one named, independently-reported assertion per behaviour, so a regression says which of
+      # 130 behaviours broke instead of "RED (1 failing)". Every server they start binds an
+      # EPHEMERAL port, so the job needs no port allocation and cannot collide with itself.
+      - name: the driver unit tests
+        run: python -m pytest tests -q
 
   # The revision of "what records and judges" must be stable for a given tree, or every
   # golden that carries it is unverifiable. Two runs, same answer.

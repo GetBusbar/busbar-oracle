@@ -698,6 +698,22 @@ class _Audio:
     def out(self) -> dict:
         return {"bytes": self.n, "sha256": self.digest}
 
+    @classmethod
+    def already(cls, v):
+        """A payload some earlier pass already summarised, recognised by its exact shape.
+
+        NORMALIZING TWICE MUST NOT DRIFT. Fed its own output, the walk saw `{"bytes": N, "sha256":
+        "<64 hex>"}` as an ordinary dict, and the string rules then ate the digest -- the second pass
+        wrote `"sha256": "<HASH>"` and a golden that was re-derived rather than re-recorded silently
+        changed. renormalize.sh re-runs from `raw/captured.json` and so does not hit this today, but
+        "faithful only as long as nobody feeds it a cell" is not a property worth having."""
+        if (isinstance(v, dict) and set(v) == {"bytes", "sha256"}
+                and isinstance(v["bytes"], int) and isinstance(v["sha256"], str)):
+            got = cls(b"")
+            got.n, got.digest = v["bytes"], v["sha256"]
+            return got
+        return None
+
 
 WS_DIALECTS = {
     # OpenAI Realtime. Every server event carries a fresh `event_id`; a turn's `response_id` and
@@ -773,6 +789,10 @@ def norm_ws_doc(v, row, event, audio_keys, ids: dict, applied: set, key_id: str 
         out = {}
         for k, x in v.items():
             child = f"{path}/{str(k).replace('~', '~0').replace('/', '~1')}"
+            if k in audio_keys:
+                summarised = _Audio.already(x)
+                if summarised is not None:
+                    out[k] = summarised; applied.add("ws.audio"); continue
             if k in audio_keys and isinstance(x, str):
                 try:
                     out[k] = _Audio(base64.b64decode(x, validate=True)); applied.add("ws.audio"); continue
@@ -825,7 +845,9 @@ def norm_ws(ws: dict, applied: set, key_id: str | None) -> dict:
     frames = []
     for f in ws.get("frames") or []:
         g = dict(f)
-        if "base64" in g and g.get("opcode") in ("binary", "continuation"):
+        if "base64_audio" in g:
+            applied.add("ws.binary-payload")     # already summarised by an earlier pass; see _Audio.already
+        elif "base64" in g and g.get("opcode") in ("binary", "continuation"):
             # NEUTRAL, NOT PER-DIALECT: a binary frame on a realtime session is audio by
             # construction, whichever provider's grammar the text frames are in.
             try:

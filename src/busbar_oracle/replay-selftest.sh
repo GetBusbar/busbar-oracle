@@ -138,8 +138,13 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 for c in d["cells"]:
     if c["id"] == "self|a|ok":
-        # everything except `headers`: a legal narrowing gives up a class rated 1, never money
-        c["compare"] = ["status", "body", "effects.stderr", "effects.usage", "effects.usage_after_restart",
+        # everything except `headers`: a legal narrowing gives up a class rated 1, never money.
+        # `ws` (0.3.12) is in the list because it is MONEY -- COMPARE_MAY_NEVER_DROP refuses a
+        # narrowing that gives up a money class, so leaving it out would make this case fail as a
+        # loader refusal rather than prove what it is about. That is the rule working: every class
+        # this file rates 10 has to be named here, and the day one is added and forgotten, this
+        # case says so.
+        c["compare"] = ["status", "ws", "body", "effects.stderr", "effects.usage", "effects.usage_after_restart",
                         "effects.store_errors", "effects.metrics", "effects.audit", "norm.rules",
                         "effects.egress", "effects.readback", "effects.files", "effects.script"]
         c["why"] = "selftest: the header set is not this cell's contract"

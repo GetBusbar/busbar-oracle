@@ -7,7 +7,7 @@
 #
 # Faithful to record.sh, or refused: the cell's `keep` / `body_lines` spec is read from cells.json
 # by id and passed exactly as record.sh's call site FOR THAT CELL'S DRIVER passes it (record.sh has
-# four normalize.py invocations, not one — see the driver table below), and a cell whose recorded
+# five normalize.py invocations, not one — see the driver table below), and a cell whose recorded
 # capture carries a
 # readback (folded in by record.sh AFTER normalization, from live requests that cannot be replayed
 # here) keeps its readback verbatim. A cell id that cells.json no longer knows is left untouched
@@ -51,7 +51,7 @@ for raw in "$d"/raw/*/; do
   driver="$(jq -r '.driver' <<<"$spec")"
   # ── FAITHFUL TO THIS CELL'S OWN RECORDER CALL SITE, OR REFUSED ────────────────────────────────
   # This file's whole claim is that it re-derives a cell "exactly as record.sh passes it". record.sh
-  # does NOT have one normalize.py invocation; it has four, and they pass different flags:
+  # does NOT have one normalize.py invocation; it has five, and they pass different flags:
   #
   # NAMED BY CALL SITE, NOT BY LINE NUMBER. This table cited `the recorder's http call site / 526 / 740 / 825`, and
   # every one of those numbers was stale — record.sh's four invocations had moved. Worse, a self-test
@@ -64,6 +64,11 @@ for raw in "$d"/raw/*/; do
   #   exec        record_exec_cell()                        --keep-body-lines, --keep   (no --key-id)
   #   concurrent  record_concurrent_cell()                  --key-id, --driver concurrent (no keep spec)
   #   script      the main loop's `driver = script` branch  nothing at all
+  #   ws          record_ws_cell()                          --key-id ALONE (no keep spec, and
+  #                                                         deliberately NO --driver: the frame
+  #                                                         canonicaliser is chosen by the
+  #                                                         recording's own ws.dialect, which is
+  #                                                         inside captured.json)
   #
   # Passing all three uniformly, as this loop did, means a `keep` or `body_lines` on a script or
   # concurrent cell is applied HERE and was never applied by the recorder: the re-normalized cell is
@@ -90,6 +95,15 @@ for raw in "$d"/raw/*/; do
         failed=$((failed+1)); continue
       fi
       keep_spec=""; keep_lines=""; driver_flag=(--driver concurrent) ;;
+    ws)
+      # record_ws_cell() passes --key-id and nothing else. A ws cell's contract is its transcript,
+      # and `keep`/`body_lines` are body-shaped specs the recorder's ws call site would have ignored
+      # — applying them here would write a cell the recorder never made.
+      if [ -n "$keep_spec" ] || [ -n "$keep_lines" ]; then
+        echo "renormalize: $id is a ws cell and cells.json gives it a keep/body_lines spec, but record_ws_cell() normalizes ws cells with --key-id ALONE; applying the spec here would write a cell the recorder never made" >&2
+        failed=$((failed+1)); continue
+      fi
+      keep_spec=""; keep_lines="" ;;
     script)
       if [ -n "$keep_spec" ] || [ -n "$keep_lines" ]; then
         echo "renormalize: $id is a script cell and cells.json gives it a keep/body_lines spec, but the recorder's script call site normalizes script cells with NO flags at all; applying the spec here would write a cell the recorder never made" >&2
@@ -97,7 +111,7 @@ for raw in "$d"/raw/*/; do
       fi
       kid=""; keep_spec=""; keep_lines="" ;;
     *)
-      echo "renormalize: $id has an unknown driver ${driver@Q}; refusing to guess which of record.sh's four normalize.py call sites made it" >&2
+      echo "renormalize: $id has an unknown driver ${driver@Q}; refusing to guess which of record.sh's five normalize.py call sites made it" >&2
       failed=$((failed+1)); continue ;;
   esac
   readback="$(jq -c '.effects.readback // empty' "$cell" 2>/dev/null)"
