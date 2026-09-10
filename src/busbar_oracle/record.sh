@@ -65,7 +65,10 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$BIN" ] && [ -n "$OUT" ] || { echo "usage: $0 --bin <busbar> --out <dir> [--filter re]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "record.sh needs jq" >&2; exit 2; }
-case "$PLANE" in llm|core|all) ;; *) echo "record.sh: planes recorded natively: llm, core (cli/config/scrape/crosscut/admin/boot), all; mcp/a2a go through the conformance rigs" >&2; exit 2 ;; esac
+# `streams` joins the natively-recorded planes with the ws driver (0.3.12): the served-session
+# family is recorded from a real socket by capture-ws.py, so it selects like llm and core do rather
+# than going through a conformance rig. mcp/a2a still do -- they have no recorder here at all.
+case "$PLANE" in llm|core|streams|all) ;; *) echo "record.sh: planes recorded natively: llm, core (cli/config/scrape/crosscut/admin/boot), streams (served ws sessions), all; mcp/a2a go through the conformance rigs" >&2; exit 2 ;; esac
 
 LISTEN_PORT="${ORACLE_LISTEN_PORT:-48811}" ADMIN_PORT="${ORACLE_ADMIN_PORT:-48812}" MOCK_PORT="${ORACLE_MOCK_PORT:-48781}"
 
@@ -939,6 +942,93 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
   n=$((n + 1))
 }
 
+# ── ws cells: one duplex WebSocket session, recorded frame by frame ──────────────────────────────
+# {ws: {dialect, path, listener, auth, headers, key, timeout_secs, script, close}, mock_control,
+#  fresh, config_variant}. The streams plane's served sessions are not request/response pairs, so
+# what this driver records is the SESSION: the handshake (status + headers, or the whole HTTP
+# response if the door refused it), every frame in wire order in both directions, the close code and
+# reason, and the same before/after usage/metrics/audit/egress deltas every other driver records.
+#
+# THE SNAPSHOTS BRACKET THE SESSION, NOT A PROCESS. capture-ws.py is therefore run twice: once with
+# --drive between the two snapshots (the socket work, writing ws.json), and once after them to
+# assemble captured.json out of ws.json plus the deltas -- exactly the split capture.py does not
+# need, because a curl response is over before the after-snapshot is taken.
+#
+# A DRIVER THAT COULD NOT RUN THE CELL IS A FAIL ROW, NEVER A RECORDING. capture-ws exits non-zero
+# with a `harness_error` line when an `await` the door never satisfied timed out -- a transcript cut
+# off by the recorder's own clock is not what the door did, and freezing it into the golden would
+# make every later binary reproduce the recorder's timeout. Same rule as the concurrent driver's
+# "no HTTP response (curl)" row.
+record_ws_cell() {  # <id> <cell-json> <raw-dir> <safe>
+  local id="$1" cell="$2" raw="$3" safe="$4" dialect path listener token kid mc port spec status frames close_note
+  cell="$(subst_placeholders "$cell")"
+  dialect="$(jq -r '.ws.dialect // empty' <<<"$cell")"
+  path="$(jq -r '.ws.path // empty' <<<"$cell")"
+  if [ -z "$path" ]; then
+    record "$id" FAIL "a ws cell needs .ws.path" "the cell named no path to open the session on"; return
+  fi
+  listener="$(jq -r '.ws.listener // "data"' <<<"$cell")"
+  case "$(jq -r '.ws.auth // "ok"' <<<"$cell")" in
+    broke) token="$ORACLE_TOKEN_BROKE"; kid="$ORACLE_KEY_BROKE" ;;
+    noscope) token="$ORACLE_TOKEN_NOSCOPE"; kid="$ORACLE_KEY_NOSCOPE" ;;
+    admin) token="$ORACLE_ADMIN_TOKEN"; kid="$ORACLE_KEY_OK" ;;
+    none) token=""; kid="$ORACLE_KEY_OK" ;;
+    *) token="$ORACLE_TOKEN_OK"; kid="$ORACLE_KEY_OK" ;;
+  esac
+  port="$LISTEN_PORT"; [ "$listener" = admin ] && port="$ADMIN_PORT"
+  # THE SPEC IS THE CELL, PLUS THE BOOT'S TWO FACTS (which port, which token). The cell's own headers
+  # come first and the Authorization last, the same order the http driver hands them to curl, so the
+  # request head the door sees is the cell's -- capture-ws writes them in exactly this order after
+  # the four RFC-required ones.
+  spec="$(jq -c --arg url "ws://127.0.0.1:${port}${path}" --arg tok "$token" '
+      (.ws // {}) as $w
+      | {url: $url, dialect: ($w.dialect // null), key: ($w.key // null),
+         timeout_secs: ($w.timeout_secs // null), script: ($w.script // []), close: ($w.close // null),
+         headers: (($w.headers // {}) + (if $tok == "" then {} else {"Authorization": ("Bearer " + $tok)} end))}' <<<"$cell")"
+  printf '%s\n' "$spec" >"$raw/ws-spec.json"
+  mc="$(jq -c '.mock_control // empty' <<<"$cell")"
+  if [ -n "$mc" ] && [ "$mc" != "{}" ]; then
+    oracle_write_control "$CONTROL" "$MOCK_PORT" "$mc" \
+      || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; return; }
+  fi
+  settle_then_snapshot "$raw/before" "$kid"
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.before"
+  local drive_rc=0
+  python3 "${here}/capture-ws.py" --drive "$raw/ws-spec.json" >"$raw/ws.json" 2>"$raw/ws.err" || drive_rc=$?
+  settle_then_snapshot "$raw/after" "$kid"
+  clear_control_or_die "$id"
+  ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.after"
+  local -a egress_files=()
+  while IFS= read -r f; do [ -n "$f" ] && egress_files+=("$WORK/egress/$f"); done < <(LC_ALL=C comm -13 "$raw/egress.before" "$raw/egress.after")
+  egress_settle "$id" "${egress_files[@]}"
+  if [ "$drive_rc" -ne 0 ] || [ ! -s "$raw/ws.json" ]; then
+    record "$id" FAIL "the ws session could not be driven" \
+      "$(tr '\n' ' ' <"$raw/ws.err" | tail -c 300); a session the recorder abandoned is not a session the door refused, and recording it would make every later binary reproduce this harness's clock"
+    return
+  fi
+  if [ -n "$SNAPSHOT_FAIL" ]; then
+    record "$id" FAIL "$SNAPSHOT_FAIL" \
+      "the usage/audit delta this cell is about was never measured; recorded as {\"unavailable\":true} it would compare equal on both sides"
+    return
+  fi
+  if ! python3 "${here}/capture-ws.py" "$raw/ws.json" "$raw/before" "$raw/after" "${egress_files[@]}" >"$raw/captured.json" 2>"$raw/capture.err"; then
+    record "$id" FAIL "capture-ws.py failed" "$(tail -c 300 "$raw/capture.err")"; return
+  fi
+  printf '%s\n' "$kid" >"$raw/key-id"   # so renormalize.sh can re-run this cell faithfully
+  # NO --driver FLAG. The frame canonicaliser normalize.py must apply is chosen by the recording's
+  # OWN `ws.dialect`, which travels inside captured.json -- so renormalize.sh re-derives a ws cell
+  # years later without a driver table that could have drifted, and a cell can never be
+  # re-normalized under a dialect other than the one it was recorded in.
+  if ! python3 "${here}/normalize.py" "$raw/captured.json" --key-id "$kid" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
+    record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return
+  fi
+  status="$(jq -r '.status' "$OUT/cells/$safe.json")"
+  frames="$(jq -r '(.ws.frames // []) | length' "$OUT/cells/$safe.json")"
+  close_note="$(jq -r 'if .ws == null then "no session (handshake refused)" else "close \(.ws.close.by) \(.ws.close.code // "none")" end' "$OUT/cells/$safe.json")"
+  record "$id" PASS "ws ${dialect:-none}; handshake ${status}; ${frames} frames; ${close_note}; usage Δ $(jq -c '.effects.usage' "$OUT/cells/$safe.json")" ""
+  n=$((n + 1))
+}
+
 # ── the cells ───────────────────────────────────────────────────────────────────────────────────
 n=0
 # THE PRODUCER PROJECTS THE DISPATCH FIELDS; the loop reads them, it does not re-parse the cell to
@@ -1094,6 +1184,9 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
   fi
   if [ "$driver" = concurrent ]; then
     record_concurrent_cell "$id" "$cell" "$raw" "$safe"; continue
+  fi
+  if [ "$driver" = ws ]; then
+    record_ws_cell "$id" "$cell" "$raw" "$safe"; continue
   fi
   if [ "$driver" = http ]; then
     # An explicit request: {method, path, headers, body, auth: ok|broke|noscope|admin|none, listener,

@@ -33,6 +33,7 @@ Subcommands map one-to-one onto the shipped drivers:
   selftest      selftest.sh               the tool's own self-tests
   fetch-golden  fetch-golden.sh           fetch + digest-verify a pinned golden binary
   mock          mock-upstream.py          the multi-dialect mock upstream
+  capture-ws    capture-ws.py             the `ws` driver: drive and record one duplex session
 """
 from __future__ import annotations
 
@@ -62,6 +63,7 @@ COMMANDS = {
     "apply-mutation": "apply-mutation.py",
     "build-request": "build-request.py",
     "capture": "capture.py",
+    "capture-ws": "capture-ws.py",
     "cells": "enumerate-cells.py",
     "fixture-gate-selftest": "fixture-gate-selftest.sh",
 }
