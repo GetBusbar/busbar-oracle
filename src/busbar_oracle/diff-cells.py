@@ -49,6 +49,7 @@ and prints one TSV row per owed id on stdout: <id> <TAB> PASS|FAIL <TAB> <classe
 Exit 0 always — the VERDICT is verdict.sh's job, not this file's.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -858,6 +859,158 @@ def text_diff(a: str, b: str):
     return None
 
 
+# ── A SCRIPT EFFECT THAT IS A MEASUREMENT OF THE BODY FOLLOWS THE BODY'S VERDICT ──────────────────
+# `effects.script` is every other key a driver writes into `effects`, and it is MONEY (rated 10): a
+# script cell's evidence is the whole of what that cell pins, so a `survived` that flipped or a
+# `key_after_restart` that moved must never be forgivable by an `improvement` entry. That rating is
+# right, and it is not narrowed here.
+#
+# BUT ONE SHAPE OF SCRIPT EFFECT IS NOT AN INDEPENDENT SIGNAL AT ALL: a figure the driver computed
+# BY MEASURING THE RESPONSE BODY. `llm-stream-fault.sh` records `stream_fault.body_bytes`, which is
+# `wc -c` over the very bytes the `body` class already compares. When the register accepts the
+# body's change, that same change arrives a second time as a money divergence — not a second fact
+# about busbar, the SAME fact counted twice — and no register kind can take it: `additive` is
+# defined for {body, headers, effects.stderr, status} and refuses `effects.script` at load, and it
+# should keep refusing it, because "an owner may declare a money class forgiven" is exactly the
+# blanket the register exists to prevent.
+#
+# So this is NOT a new register power. It is a RELATION THE DIFFER PROVES about a recorded pair,
+# borrowing the verdict the register already gave the body:
+#
+#   (a) the `body` class is accepted, on THIS cell, by a register entry (`cover` is non-empty and
+#       `body` has left `need`);
+#   (b) every differing `effects.script` leaf is a NAMED body-derived measurement whose value
+#       really is that measurement of the recorded body, on BOTH sides (see below);
+#   (c) every other `effects.script` member is byte-identical — proven by putting the golden's value
+#       back at each derived leaf and requiring the whole moved subtree to be equal again, so a
+#       neighbour that also moved (or a `paths` list truncated by json_paths_diff's limit) refuses
+#       the cell rather than riding along.
+#
+# Any failure of (a)-(c) leaves `effects.script` a money divergence exactly as before, and the
+# acceptance is never silent: the row says `ACCEPTED derived-from-body (entry <id>): ...` out loud,
+# with the two figures and the relation that explains them.
+#
+# WHICH FIELDS ARE DERIVED, AND WHY EACH ONE IS. Measured against the drivers, not guessed:
+# `llm-stream-fault.sh` is the only script driver in the corpus that records a measurement of the
+# body, and it records exactly one — `body_bytes` (`wc -c <"$RAW/body"`). `capture.py` and
+# `capture-exec.py` record none. The sibling spellings are named too, because the check below is
+# the proof and the NAME is only the invitation to apply it: a field called `body_len` whose value
+# is not the length of the body is refused just as loudly as one called `survived`.
+#
+# `body_frames` IS DELIBERATELY NOT HERE. It is a count of SSE/eventstream frames, not a length or
+# a digest: the number of frames a body decodes to is a property of the dialect's framing, not of
+# its byte count, and the owner's ruling names the frame count as one of the facts that had to be
+# UNMOVED for the body's growth to be additive at all. A frame count that moved is a real
+# divergence and stays one.
+DERIVED_BODY_FIELDS = {"body_bytes": "len", "body_len": "len", "body_length": "len",
+                       "body_sha256": "sha256"}
+
+
+def body_text_bytes(cell) -> bytes | None:
+    """The recorded body AS BYTES, or None when this cell has no byte form to be derived from.
+
+    Only a TEXT body qualifies. A `json` or `eventstream` body is recorded as STRUCTURE — re-parsed,
+    re-serialized, re-framed — so its byte length in the recording is a property of normalize.py's
+    serializer and not of what busbar sent; there is nothing there for a driver's count to be a
+    count OF, and the relation is refused rather than evaluated against a number that means
+    something else."""
+    b = cell.get("body")
+    if isinstance(b, dict) and isinstance(b.get("text"), str):
+        return b["text"].encode("utf-8")
+    return None
+
+
+def _pointer_set(doc, path: str, value) -> bool:
+    """Put `value` at `path` in `doc` (json_paths_diff's own path convention). False if it does not
+    resolve — a path that does not address a leaf can never be credited as a derived one."""
+    parts = [p for p in path.split("/")[1:]]
+    if not parts:
+        return False
+    node = doc
+    for seg in parts[:-1]:
+        if isinstance(node, dict) and seg in node:
+            node = node[seg]
+        elif isinstance(node, list) and seg.isdigit() and int(seg) < len(node):
+            node = node[int(seg)]
+        else:
+            return False
+    last = parts[-1]
+    if isinstance(node, dict) and last in node:
+        node[last] = value
+        return True
+    if isinstance(node, list) and last.isdigit() and int(last) < len(node):
+        node[int(last)] = value
+        return True
+    return False
+
+
+def derived_from_body(g: dict, cc: dict, det: dict, entry_id: str):
+    """(rows, None) when every `effects.script` difference on this cell is a measurement of the
+    body the register already accepted; (None, why) otherwise. See the block comment above."""
+    moved = det.get("keys") or []
+    paths = det.get("paths") or []
+    if not moved or not paths:
+        return None, "derived-from-body: effects.script diverged with no located difference to explain"
+    gb, cb = body_text_bytes(g), body_text_bytes(cc)
+    if gb is None or cb is None:
+        return None, ("derived-from-body: the body is not TEXT on both sides — a `json` or `eventstream` body is "
+                      "recorded as structure, so it has no recorded byte length for a count to be derived from")
+    rows = []
+    for p in paths:
+        path = p["path"]
+        kind = DERIVED_BODY_FIELDS.get(path.rsplit("/", 1)[-1])
+        gv, cv = p.get("golden"), p.get("candidate")
+        if kind is None:
+            return None, (f"derived-from-body: effects.script{path} is not a body-derived measurement "
+                          f"({', '.join(sorted(DERIVED_BODY_FIELDS))}), so it does not follow the body's verdict")
+        if kind == "len":
+            if not all(isinstance(v, int) and not isinstance(v, bool) for v in (gv, cv)):
+                return None, (f"derived-from-body: effects.script{path} is not an integer byte count on both "
+                              f"sides ({json.dumps(gv)} -> {json.dumps(cv)})")
+            gs, cs = gv - len(gb), cv - len(cb)
+            if gs < 0 or cs < 0:
+                return None, (f"derived-from-body: effects.script{path} is SMALLER than the body it claims to "
+                              f"measure (golden {gv} vs len(body) {len(gb)}; candidate {cv} vs len(body) "
+                              f"{len(cb)}) — it is not a count of these bytes")
+            if gs != cs:
+                # A driver counts the bytes BEFORE normalize.py sees them (a frame count taken after
+                # normalization would be a property of the normalizer), so the figure may sit a fixed
+                # distance above the recorded body — the bytes an id/timestamp rule replaced. That
+                # distance is the one thing that must be IDENTICAL on the two sides: it is what makes
+                # `622 - 482` the body's own growth and nothing else's. When it moves, something the
+                # recording no longer shows moved with it, and that is a divergence, not a shadow.
+                return None, (f"derived-from-body: effects.script{path} did not move with the body: golden {gv} = "
+                              f"len(body) {len(gb)} + {gs}, candidate {cv} = len(body) {len(cb)} + {cs}. The count "
+                              f"is taken on the PRE-normalization bytes, so it may sit a fixed distance above the "
+                              f"recorded body — but that distance must be the SAME on both sides, or something "
+                              f"other than the accepted body moved it")
+            expr = "len(body)" if cs == 0 else f"len(body)+{cs}"
+        else:
+            if not all(isinstance(v, str) for v in (gv, cv)):
+                return None, (f"derived-from-body: effects.script{path} is not a hex digest on both sides "
+                              f"({json.dumps(gv)} -> {json.dumps(cv)})")
+            gd, cd = hashlib.sha256(gb).hexdigest(), hashlib.sha256(cb).hexdigest()
+            if gv.lower() != gd or cv.lower() != cd:
+                return None, (f"derived-from-body: effects.script{path} is not the sha256 of the recorded body "
+                              f"(golden {gv} vs {gd}; candidate {cv} vs {cd})")
+            expr = "sha256(body)"
+        rows.append({"entry": entry_id, "path": path, "golden": gv, "candidate": cv, "expr": expr})
+    # (c) EVERY OTHER MEMBER, BYTE-IDENTICAL — proven, not assumed. Put the golden's figure back at
+    # each derived leaf; what is left must be equal. A neighbour that also moved, a key that appeared
+    # on one side only, or a `paths` list json_paths_diff truncated at its limit all fail here.
+    ge, ce = g.get("effects") or {}, cc.get("effects") or {}
+    gsub = {k: ge.get(k) for k in moved}
+    patched = json.loads(json.dumps({k: ce.get(k) for k in moved}))
+    for p in paths:
+        if not _pointer_set(patched, p["path"], p.get("golden")):
+            return None, f"derived-from-body: effects.script{p['path']} does not address a leaf of the candidate's effects"
+    if patched != gsub:
+        return None, ("derived-from-body: effects.script carries a difference OUTSIDE the body-derived field(s) "
+                      f"{', '.join(r['path'] for r in rows)} — the derived relation explains those figures and "
+                      "nothing else, so the class stays money")
+    return rows, None
+
+
 def body_diff(g, c):
     if g == c:
         return None
@@ -966,6 +1119,16 @@ def compare(g: dict, c: dict) -> tuple[list, dict]:
 def first_diff_text(classes, detail) -> str:
     if not classes:
         return ""
+    # THE MONEY CLASS'S ACCEPTANCE LEADS THE ROW. `classes[0]` is the earliest divergent LAYER
+    # (`body` sorts ahead of `effects.script`), which is the right lead for a divergence and the
+    # wrong one for this acceptance: the notable fact about a derived-from-body row is that a class
+    # rated 10 was forgiven, and by what relation. Said in full — both figures and the relation —
+    # so the row can never read as a silent pass.
+    if detail.get("derived.from_body"):
+        return "; ".join(f"ACCEPTED derived-from-body (entry {r['entry']}): effects.script{r['path']} "
+                         f"{r['golden']} -> {r['candidate']} = {r['expr']}" for r in detail["derived.from_body"])
+    if detail.get("derived.rejected"):
+        return detail["derived.rejected"]
     k = classes[0]
     d = detail.get(k)
     if d is None and detail.get("accepted.transform"):
@@ -1686,6 +1849,17 @@ def main() -> int:
                         cover.append(e); need -= claimed
                     if not need:
                         break
+            # ── A BYTE COUNT OF THE ACCEPTED BODY FOLLOWS THE BODY'S VERDICT ────────────────
+            # Last, deliberately: the register decides first, and this only ever runs when
+            # `effects.script` is the ONLY class still unclaimed and the body's own verdict is
+            # already in (`body` diverged and left `need`). It claims no class the register could
+            # have claimed, and it borrows the body entry's id rather than inventing an authority.
+            derived_rows, derived_note = None, None
+            if need == {"effects.script"} and cover and "body" in classes:
+                derived_rows, derived_note = derived_from_body(
+                    g, cc, detail.get("effects.script") or {}, " + ".join(e["id"] for e in cover))
+                if derived_rows:
+                    need = set()
             if cover and not need:
                 acc = cover[0] if len(cover) == 1 else {
                     "id": " + ".join(e["id"] for e in cover),
@@ -1699,6 +1873,15 @@ def main() -> int:
                     # owner reading the ledger needs, so they ride on the row rather than living
                     # only in the register entry's rationale.
                     detail = {**detail, "additive.removed": additive_removed}
+                if derived_rows:
+                    # THE ROW SAYS WHICH FIGURE WAS FORGIVEN AND WHY, exactly as `additive.removed`
+                    # says what grew: a money class credited by a relation nobody can see in the
+                    # report is a silent pass with extra steps.
+                    detail = {**detail, "derived.from_body": derived_rows}
+            elif derived_note:
+                # THE CELL STAYS RED, AND SAYS WHERE THE RELATION BROKE. The real diff (the figures
+                # at the failing path) is still in `detail`; only the ROW's headline changes.
+                detail = {**detail, "derived.rejected": derived_note}
             elif additive_note:
                 # THE CELL STAYS RED, BUT NOT SILENTLY: an additive entry matched and was tried, and
                 # this is exactly where it stopped being a superset. Attached rather than replacing
