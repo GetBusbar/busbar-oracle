@@ -223,6 +223,30 @@ a scripted duplex session. Handshake refusals are the ordinary `down`/`401`/`5xx
 that fails *after* the door started billing — is `ws-error` (the dialect's own error
 frame, then 1011) and `ws-close` (1011 with no error frame first).
 
+### A script effect that is a *measurement of the body*
+
+`effects.script` — every key a driver writes into `effects` that has no class of its own
+— is rated 10 and is in `MONEY_CLASSES`, because a script cell's evidence is the whole of
+what that cell pins. One shape of it is not an independent signal at all, though: a figure
+the driver computed **by measuring the response body**. `llm-stream-fault.sh` records
+`stream_fault.body_bytes`, which is `wc -c` over the very bytes the `body` class already
+compares, so when the register accepts the body's change that same change arrives a second
+time as a money divergence — not a second fact about busbar, the *same* fact counted twice.
+Since 0.3.13 the differ can prove that and let the figure **follow the body's verdict**,
+and it is a relation the tool proves rather than a class an owner may claim: `additive`
+still refuses `effects.script` at load, and the relation only fires when (a) `body`
+diverged *and* a register entry on that cell accepted it, (b) every differing
+`effects.script` leaf is a named body-derived measurement (`body_bytes`, `body_len`,
+`body_length`, `body_sha256` — never `body_frames`, which counts framing and not bytes)
+whose value really is that measurement of the recorded body **on both sides**, at the same
+fixed distance above it (the driver counts pre-normalization bytes, and the bytes an
+id/timestamp rule replaced must not move between the two sides), and (c) every *other*
+`effects.script` member is byte-identical, proven by putting the golden's figure back at
+each derived leaf and requiring the moved subtree to be equal again. Any failure of
+(a)–(c) leaves the class money exactly as before. It is never a silent pass: the row reads
+`ACCEPTED derived-from-body (entry <id>): effects.script/stream_fault/body_bytes 482 -> 622
+= len(body)`, and a refused relation leads with exactly where it broke.
+
 ### Flags a gate should know about
 
 | flag | on | means |

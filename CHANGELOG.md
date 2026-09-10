@@ -4,6 +4,62 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.13
+
+**A figure that is a measurement of the body, counted twice.** `llm.stream|responses|cut` is the
+script-driver cell that pins what busbar tells a caller when the upstream dies mid-stream. 1.6.0's
+fabricated `response.failed` terminal carries eight more keys than 1.5.5's — a strict superset,
+registered by the owner against the `body` class — and the cell's own driver
+(`llm-stream-fault.sh`) *also* records `effects.stream_fault.body_bytes`, which is
+`wc -c` over exactly those bytes. So the accepted growth arrived a second time in a class no
+register kind may take: `effects.script` is in `MONEY_CLASSES` and `ADDITIVE_CLASSES` is
+`{body, headers, effects.stderr, status}`. The cell could not read PASS ACCEPTED although no billed
+figure, no status, no header, no frame count and no metric had moved — not a second fact about
+busbar, the *same* fact counted twice.
+
+**The fix is a relation the differ PROVES, not a class an owner may claim.** `additive` still
+refuses `effects.script` at load, `effects.script` is still rated 10, and no entry anywhere gained a
+new power. `derived_from_body()` runs *last*, only when `effects.script` is the one class the
+register left unclaimed, and it credits it only when all three hold:
+
+* **(a) the body's verdict is in.** `body` diverged on this cell *and* left `need` — some register
+  entry accepted it. A body nothing accepted forgives nothing here either: the whole rule is
+  "follows the body's verdict", and with no entry that verdict is red.
+* **(b) the figure really is a measurement of the recorded body, on BOTH sides.** A **length** must
+  sit the SAME fixed distance above the recorded body on golden and candidate. The distance is not
+  zero in general and that is not a loophole: a driver counts the bytes *before* `normalize.py` sees
+  them (a count taken after normalization would be a property of the normalizer, which is the whole
+  reason `hdr.length` exists), so the bytes an id or timestamp rule replaced sit between the two
+  numbers — but they must not *move* between the sides, or something the recording no longer shows
+  moved with them. A **digest** must be the sha256 of the recorded body exactly. A `json` or
+  `eventstream` body is refused outright: it is recorded as structure, so its byte length in the
+  recording is the serializer's, not busbar's.
+* **(c) every other `effects.script` member is byte-identical** — proven, not assumed, by putting
+  the golden's figure back at each derived leaf and requiring the whole moved subtree to be equal
+  again. A neighbour that also moved, a key that appeared on one side only, or a `paths` list
+  `json_paths_diff` truncated at its limit all refuse the cell rather than riding along.
+
+Any failure of (a)–(c) leaves `effects.script` a money divergence exactly as before.
+
+**Which fields are derived was measured, not guessed.** Reading the script drivers, `capture.py` and
+`capture-exec.py`: `llm-stream-fault.sh` is the only driver in the corpus that measures the body,
+and it measures it once — `body_bytes`. `body_len`, `body_length` and `body_sha256` are named beside
+it because the *check* is the proof and the name is only the invitation to apply it; a field called
+`body_len` whose value is not the length of the body is refused as loudly as one called `survived`.
+**`body_frames` is deliberately not derived**: a frame count is a property of the dialect's framing,
+not of the body's byte count, and it is one of the facts the ruling required to be unmoved before
+the body's growth counted as growth at all.
+
+**It is never a silent pass.** The row leads with the acceptance and the relation that explains it —
+
+```
+ACCEPTED derived-from-body (entry <id>): effects.script/stream_fault/body_bytes 482 -> 622 = len(body)
+```
+
+— and a *refused* relation leads with exactly where it broke (`… did not move with the body: golden
+482 = len(body) 429 + 53, candidate 622 = len(body) 578 + 44`), so a cell that stays red says why in
+the same sentence.
+
 ## 0.3.12
 
 A whole plane the recorder could not reach. VT-6 measured it against the pinned `v0.3.11`: the
