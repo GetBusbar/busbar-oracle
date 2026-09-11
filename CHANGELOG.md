@@ -4,6 +4,102 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.17
+
+The corpus could only ask busbar to have a CONVERSATION. busbar serves SEVEN operations, and six of
+them -- embeddings, images, audio (both directions), moderation and rerank -- had no recorded byte
+anywhere, along with the tool-call round trip and a 429 that came from UPSTREAM rather than from
+busbar's own Admit. A codec or money defect in any of those was invisible to the differ, which is
+also why the llm-plane switch-over could not delete a legacy class: there was no golden to replace
+the live twin with.
+
+- **The request builder learns the OPERATION.** `request_for` wrote a conversation and nothing else,
+  so a cell naming an operation it had no wording for was silently posted as a CHAT body at a CHAT
+  door -- both binaries answer that the same way, so the golden freezes a cell that records the
+  opposite of its own name. The operation now decides the door BEFORE the dialect does, and a pair
+  the builder cannot word is a hard error. Three refusals are proven by self-test: a `speech` cell
+  (the LLM plane claims no speech door -- `/v1/audio/speech` is the VOICE plane's, by name), an
+  unknown op, and an (op, dialect) pair the plane does not claim.
+
+  Each door's body carries the member busbar's own reader refuses BY NAME without: `"input"` on
+  openai embeddings/moderation, `"texts"` on cohere embed, `"content"` on gemini `:embedContent`,
+  `"documents"` on cohere rerank, `"instances"` on gemini `:predict`. Transcription is the one
+  ingress that is not a JSON document at all -- the door reads `multipart/form-data` and refuses a
+  body with no `file` part -- and it posts to `/v1/audio/translations`, because the sibling
+  `/transcriptions` path is claimed by the voice plane. Its boundary is a FIXED literal and its
+  multipart writer is eleven lines here rather than a library call: the request IS the cell's
+  fixture, and a library that renumbered a boundary or reordered a field would move every recorded
+  transcription cell for a reason that has nothing to do with busbar.
+
+- **The mock upstream learns to ANSWER them**, in the shape each `read_<op>_response` parses -- and
+  three of those readers refuse a body that is merely plausible. Gemini SPEECH is `Malformed` BY NAME
+  without `candidates[0].content.parts[0].inlineData.data` in VALID base64 (camelCase only). OpenAI
+  TRANSCRIPTION bills ZERO when `usage` is present and carries no `input_tokens`. Bedrock IMAGE and
+  RERANK read no usage at all, so the bedrock rerank answer OMITS the `meta.billed_units` its cohere
+  sibling carries -- the one honest difference between them, because a `search_units` written there
+  is a number no code path can see.
+
+  Two paths multiplex, and they multiplex the way the PRODUCT does: `/model/{m}/invoke` splits
+  embeddings/image/rerank and `:generateContent` splits chat/speech/transcription, each by one
+  function written off that dialect's own `resolve_operation`. The bedrock split checks rerank FIRST,
+  anchored to the QUOTED JSON key, because the product's own comment records what the unanchored
+  version cost: a rerank DOCUMENT that merely mentioned `inputText` was read as an embeddings
+  request. A mock that multiplexed differently would answer one shape to a request busbar believes
+  it routed to another, and the cell would record that disagreement as busbar's bytes.
+
+- **`tool-call`, the eleventh verb**, answers turn ONE of the round trip: a CALL instead of text, in
+  the door's own shape. The six dialects disagree about nearly all of it -- the arguments are a JSON
+  STRING on four and an OBJECT on two; the stop token is `tool_use` on two, `tool_calls` on one,
+  `TOOL_CALL` on one, and on the remaining two THERE IS NONE (Responses has no tool-call status, the
+  signal is the output item's TYPE; Gemini's enum has no member for it and busbar PROMOTES the stop
+  reason when a call block is present). Writing an invented token on either would test the promotion
+  against a signal the vendor never sends. Like `citation`, the verb touches nothing else: every
+  other answer is byte-identical under it, so no existing golden moves.
+
+- **The round trip is a PAIR of one-request cells, and that is a measurement.** The recorder's only
+  multi-step primitive (`request.pre`) records the setup call's STATUS and discards its bytes, so a
+  round trip driven that way would record turn two and silently drop turn one -- the half where the
+  tool CALL is translated, which is the half that has never been recorded. `ok_tool_call` is turn
+  one; `ok_tool_result` is turn two, echoing the assistant's tool-call turn and the result back. The
+  two are linked by a literal, and because neither file can import the other (both are hyphenated
+  scripts), a self-test HOLDS the two copies to one value rather than trusting them. Gemini's entry
+  in the id table is `None`, not a literal: its wire carries no tool id at all and correlates by
+  NAME, so inventing one would put a member on the wire no Gemini client sends.
+
+- **A fourth SCOPED normalisation rule, `text.responses-item-id`, and it was MEASURED before it was
+  written.** Two consecutive recordings of the 139 new cells from the published 1.5.5 on
+  x86_64-unknown-linux-gnu differed in EXACTLY FIVE files -- every
+  `llm|responses|<e>|request|ok_tool_call` with `e != responses` -- each in one member, `output[0].id`:
+  `fc_jQ1M7rmH7O1GUql08rvLrzew0yroPGgqeYXFx05Cv7kwvI36` against
+  `fc_galWG2g5bJcgPUFFXBpMUFaQMfjfr7VbVBx7rWUQ4pEMToY2`. The Responses writer mints an id for every
+  output item it emits, from the OS CSPRNG, because the IR has no slot to carry one; `ID_RULES`'
+  prefix rule takes `req|resp|msg|run|call|task|sess|rtc` and `fc` is none of them, so nothing took it.
+
+  AND THE SIXTH CELL IS WHY IT IS SCOPED. `llm|responses|responses|request|ok_tool_call` -- the
+  DIAGONAL -- was byte-identical across both runs, because a same-protocol hop passes the upstream's
+  own item id through verbatim: it records the mock's fixed `fc_oracle`. That passthrough IS the
+  cell's contract. A blanket rule would replace it too, and the one cell that proves busbar does not
+  rewrite an id it was given would be unable to fail. Five cells where the figure is a DRAW; one
+  where it is a CONTRACT; the scope is the negative lookahead between them.
+
+  The existing corpus-wide guard picks the new rule up on its own: it is in scope for NONE of the 915
+  recorded ids in the committed golden, so no recorded byte can move, and it names 5 of 2457 cells.
+
+RECORDED, against the published 1.5.5 (sha256 `84bde0a0...`), x86_64-unknown-linux-gnu: 139 cells,
+139 PASS, two runs, 134 byte-identical on the first pass and all 139 once the scoped rule above was
+in. The one result worth stating out loud is `upstream_429`: on a single-member lane 1.5.5 renders an
+upstream 429 to the client as **503 `overloaded`**, not as a 429 -- the breaker classifies 429 as
+TransientUpstream (`busbar-unit-breaker/src/classify.rs`), the lane is parked, and the walk has
+nowhere left to go. A "client-visible 429" that busbar did not itself produce does not exist on that
+path, and now there are 36 recorded cells saying so.
+
+Self-tests: `mock-upstream --selftest` +31 cases (four red plants: a deleted `/v2/rerank` route; the
+bedrock multiplex reordered to the product's own historical defect; speech data that is not valid
+base64; the tool-call answer leaking into the healthy path). `replay-selftest` 289 -> 324 PASS, 0
+skipped -- including a case that FAILS when the round-trip literal block produces no rows at all,
+because that block died silently at import once and took itself out of the run while the suite
+stayed green.
+
 ## 0.3.16
 
 Two shapes of the same defect: a recorder that had MEMORISED a fact about the product

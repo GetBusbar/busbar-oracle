@@ -3457,6 +3457,189 @@ else
   wait "$qq6_pid" 2>/dev/null || true
 fi
 
+# ── (qq7) THE OPERATION AXIS: A DOOR, NOT A DIALECT ─────────────────────────────────────────────
+#
+# Through 0.3.16 `request_for` wrote a conversation and nothing else, so a cell naming an operation
+# the builder had no wording for was silently posted as a CHAT body at a CHAT door. Both binaries
+# answer such a request the same way, so the golden freezes a cell that records the opposite of its
+# own name -- the same shape as the six `stream_upstream_error` cells, and the same reason it is
+# worse than an unrecorded cell: it is green.
+#
+# THE PAIRS ARE READ OFF THE CORPUS, never listed here. Which (operation, door) pairs exist is a
+# PRODUCT fact -- it is derived, in the product's own generator, from three busbar source files --
+# and a copy of it in the tool would be exactly the memorised measurement 0.3.16 took out of the
+# recorder's rig probe. So this walks the cells.json it was pointed at, and says so out loud when
+# there is none rather than passing on an empty list.
+qq7_cells="${data}/cells.json"
+if [ ! -f "$qq7_cells" ]; then
+  skip "the op axis vs the corpus: \$BUSBAR_ORACLE_DATA names no cells.json, so no (op, door) pair was measured"
+else
+  # id, ingress, egress, op — one line per distinct (op, ingress) pair, which is what decides a door.
+  qq7_pairs="$(python3 - "$qq7_cells" <<'PY'
+import json, sys
+seen, out = set(), []
+for c in json.load(open(sys.argv[1]))["cells"]:
+    op = c.get("op", "chat")
+    if c.get("plane") != "llm" or op == "chat" or c.get("outcome") != "ok":
+        continue
+    k = (op, c["ingress_dialect"])
+    if k in seen:
+        continue
+    seen.add(k)
+    out.append("\t".join([c["id"], c["ingress_dialect"], c["egress_dialect"], op]))
+print("\n".join(out))
+PY
+)"
+  if [ -z "$qq7_pairs" ]; then
+    say FAIL "the corpus names no non-chat llm cell at all: the op axis is unproven, and a case over an empty list is the vacuous green this file refuses"
+  else
+    # The member each door's reader REFUSES to work without, by (op, ingress). Not a restatement of
+    # the builder: these are the names busbar's own `read_<op>_request` errors BY, so a body that
+    # lost one is a 400 with that member in the message. The path is the door the ladder claims.
+    while IFS=$'\t' read -r qq7_id qq7_i qq7_e qq7_op; do
+      [ -n "$qq7_id" ] || continue
+      qq7_req="$(qq_build "{\"ingress_dialect\":\"$qq7_i\",\"egress_dialect\":\"$qq7_e\",\"op\":\"$qq7_op\",\"outcome\":\"ok\"}")" || qq7_req=""
+      if [ -z "$qq7_req" ]; then
+        say FAIL "build-request refused the corpus cell $qq7_id: a cell the product enumerates has no request"
+        continue
+      fi
+      qq7_v="$(python3 - "$qq7_req" "$qq7_op" "$qq7_i" <<'PY'
+import json, sys
+r = json.loads(sys.argv[1]); op, ing = sys.argv[2], sys.argv[3]
+path, body, ctype = r["path"], r["body"], r["headers"].get("Content-Type", "")
+# (door-substring, required-member) per (op, ingress) -- the names busbar's readers refuse BY.
+WANT = {
+    ("embeddings", "openai"): ("/v1/embeddings", '"input"'),
+    ("embeddings", "cohere"): ("/v2/embed", '"texts"'),
+    ("embeddings", "gemini"): (":embedContent", '"content"'),
+    ("image", "openai"): ("/v1/images/generations", '"prompt"'),
+    ("image", "gemini"): (":predict", '"instances"'),
+    ("moderation", "openai"): ("/v1/moderations", '"input"'),
+    ("rerank", "cohere"): ("/v2/rerank", '"documents"'),
+    ("transcription", "openai"): ("/v1/audio/translations", 'name="file"'),
+}
+want = WANT.get((op, ing))
+if want is None:
+    print(f"FAIL\tthe corpus enumerates ({op}, {ing}) and this case has no door for it")
+    sys.exit()
+door, member = want
+bad = []
+if door not in path:
+    bad.append(f"path {path!r} is not the {door} door")
+if member not in body:
+    bad.append(f"body carries no {member}")
+if r["method"] != "POST":
+    bad.append(f"method {r['method']}")
+if op == "transcription":
+    if not ctype.startswith("multipart/form-data; boundary="):
+        bad.append(f"content-type {ctype!r} is not multipart")
+    elif ctype.split("boundary=", 1)[1] not in body:
+        bad.append("the declared boundary does not appear in the body")
+    if r.get("stream"):
+        bad.append("a multipart transcription declared a stream")
+elif ctype != "application/json":
+    bad.append(f"content-type {ctype!r}")
+print(("FAIL\t" + "; ".join(bad)) if bad else f"PASS\t{op} on the {ing} door -> {door}, carrying {member}")
+PY
+)"
+      say "${qq7_v%%$'\t'*}" "op axis: ${qq7_v#*$'\t'}"
+    done <<<"$qq7_pairs"
+
+    # A chat cell is BYTE-UNCHANGED by the new dispatch. Every recorded llm cell in the golden is a
+    # chat cell, and the op axis must not have moved one of them: the request is the fixture.
+    qq7_chat_new="$(qq_build '{"ingress_dialect":"anthropic","egress_dialect":"cohere","op":"chat","outcome":"ok"}')"
+    qq7_chat_old="$(qq_build '{"ingress_dialect":"anthropic","egress_dialect":"cohere","outcome":"ok"}')"
+    [ -n "$qq7_chat_new" ] && [ "$qq7_chat_new" = "$qq7_chat_old" ] \
+      && say PASS "a chat cell builds identically with and without an explicit op (no recorded request moved)" \
+      || say FAIL "the op dispatch moved a chat cell's request: with op '$qq7_chat_new' vs without '$qq7_chat_old'"
+  fi
+fi
+
+# THE TWO DOORS THE BUILDER MUST REFUSE. A refusal is the whole value here: the alternative is a
+# request posted somewhere it does not belong, recorded under a name that promises otherwise.
+if qq_build '{"ingress_dialect":"openai","egress_dialect":"openai","op":"speech","outcome":"ok"}' >/dev/null 2>&1; then
+  say FAIL "build-request built a SPEECH request: /v1/audio/speech is the VOICE plane's door, so this would record a 404 under a happy-path name"
+else
+  say PASS "build-request refuses speech: no rung of the llm ladder claims a path op_class_for calls speech"
+fi
+if qq_build '{"ingress_dialect":"openai","egress_dialect":"openai","op":"not-an-op","outcome":"ok"}' >/dev/null 2>&1; then
+  say FAIL "build-request built a request for an unknown op instead of refusing it"
+else
+  say PASS "build-request refuses an op it has no wording for, rather than falling back to a chat body"
+fi
+if qq_build '{"ingress_dialect":"anthropic","egress_dialect":"anthropic","op":"rerank","outcome":"ok"}' >/dev/null 2>&1; then
+  say FAIL "build-request built a rerank on the ANTHROPIC door, which claims no rerank path"
+else
+  say PASS "build-request refuses an (op, dialect) pair the plane does not claim"
+fi
+
+# ── (qq8) THE ROUND TRIP IS A PAIR, AND THE PAIR IS LINKED BY A LITERAL ─────────────────────────
+#
+# `ok_tool_call` records turn one and `ok_tool_result` records turn two. They are two cells because
+# the recorder's only multi-step primitive discards the setup call's BYTES -- but two cells only
+# compose into a round trip if turn two echoes the id turn one was ANSWERED with. That id lives in
+# two files (build-request.py words the request, mock-upstream.py words the answer) and neither can
+# import the other, so the agreement is PROVEN here rather than trusted.
+qq8_v="$(python3 - "${here}/build-request.py" "${here}/mock-upstream.py" <<'PY'
+import importlib.util, json, sys
+
+
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    sys.argv = [path]          # neither file parses argv at import, but be explicit about it
+    spec.loader.exec_module(m)
+    return m
+
+
+# BOTH PATHS ARE TAKEN BEFORE EITHER LOAD. `load` overwrites sys.argv (so a module that read it at
+# import time would see a sane one), which means reading sys.argv[2] AFTER the first load reads the
+# argv `load` just installed -- an IndexError that took this whole block out silently.
+_br_path, _mu_path = sys.argv[1], sys.argv[2]
+br, mu = load(_br_path, "qq8_br"), load(_mu_path, "qq8_mu")
+rows = []
+
+
+def check(ok, what):
+    rows.append(("PASS" if ok else "FAIL") + "\t" + what)
+
+
+check(br.TOOL_NAME == mu.TOOL_NAME, f"the tool NAME is one value in both files ({br.TOOL_NAME})")
+check(br.TOOL_ARGS == mu.TOOL_ARGS, "the tool ARGUMENTS are one value in both files")
+check(br.TOOL_ARGS_JSON == mu.TOOL_ARGS_JSON, "…and their JSON-string encoding agrees byte for byte")
+# The ids, per dialect. gemini's is None on purpose: its wire carries no tool id at all and
+# correlates by NAME, so there is nothing for the answer and the echo to agree ABOUT.
+for d, mock_id in (("anthropic", mu.TOOL_ID_ANTHROPIC), ("openai-chat", mu.TOOL_ID_OPENAI),
+                   ("openai-responses", mu.TOOL_ID_OPENAI), ("bedrock", mu.TOOL_ID_BEDROCK),
+                   ("cohere", mu.TOOL_ID_OPENAI)):
+    check(br.TOOL_IDS[d] == mock_id, f"{d}: turn two echoes the id the mock's answer carries ({mock_id})")
+check(br.TOOL_IDS["gemini"] is None,
+      "gemini carries NO tool id on the wire (it correlates by name), so the builder invents none")
+# …and the id is actually IN the bytes of both, not merely in a constant beside them.
+for d in ("anthropic", "openai-chat", "openai-responses", "bedrock", "cohere"):
+    cell = {"ingress_dialect": {"openai-chat": "openai", "openai-responses": "responses"}.get(d, d),
+            "egress_dialect": "gemini", "op": "chat", "outcome": "ok_tool_result"}
+    body = br.request_for(cell)["body"]
+    check(br.TOOL_IDS[d] in body and br.TOOL_RESULT in body,
+          f"{d}: turn two's BODY carries both the tool id and the result")
+    turn1 = br.request_for({**cell, "outcome": "ok_tool_call"})["body"]
+    check(br.TOOL_NAME in turn1 and br.TOOL_RESULT not in turn1,
+          f"{d}: turn one DECLARES the tool and carries no result (it has not been called yet)")
+print("\n".join(rows))
+PY
+)"
+# A BLOCK THAT PRODUCED NOTHING IS NOT A BLOCK THAT PASSED. The loop below skipped empty lines, so
+# when the python above died at import the entire case vanished from the run and the suite stayed
+# green -- the vacuous shape this file refuses everywhere else. An empty result is now one FAIL row.
+if [ -z "${qq8_v//[[:space:]]/}" ]; then
+  say FAIL "the round-trip literal check produced no rows at all: build-request.py and mock-upstream.py were never compared"
+else
+  while IFS=$'\t' read -r qq8_r qq8_w; do
+    [ -n "${qq8_r:-}" ] || continue
+    say "$qq8_r" "round trip: $qq8_w"
+  done <<<"$qq8_v"
+fi
+
 # (rr) A CELL ID IS NOT A PATH.
 #
 # The recorder wrote every cell to `${id//|/__}` — the ONE separator the llm and core planes' ids
@@ -3879,6 +4062,28 @@ xx_has "text.retry-after-seconds: the breaker-open rendering (\`Retry after {n}s
 xx_out="$(xx_norm 'mcp|streamable-http|server|client|tools/call|ok' "$xx_mcp_budget")"
 xx_has "text.retry-after-seconds: OUT OF SCOPE the same figure is left exactly as recorded" "$xx_out" '63690' '<RETRY_SECS>'
 
+# 8b. text.responses-item-id — MEASURED nondeterminism, and the ONE cell where the same shape is a
+#     CONTRACT. Two consecutive recordings of the 139 op-axis cells from the published 1.5.5 differed
+#     in exactly five files, all `llm|responses|<e>|request|ok_tool_call` with e != responses, each in
+#     one member: the Responses writer mints an item id per emit because the IR has no slot for one.
+#     The DIAGONAL was byte-identical both runs -- a same-protocol hop passes the upstream's own id
+#     through -- so the diagonal records the mock's fixed `fc_oracle`, and THAT PASSTHROUGH IS THE
+#     CELL'S CONTRACT. A blanket rule would take it too, and the one cell that proves busbar does not
+#     rewrite an id it was given would be unable to fail. Both arms are driven here.
+xx_fc='{"status":200,"headers":{"content-type":"application/json"},"body":"{\"id\":\"resp_x1\",\"object\":\"response\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_jQ1M7rmH7O1GUql08rvLrzew0yroPGgqeYXFx05Cv7kwvI36\",\"call_id\":\"call_oracle0001\",\"name\":\"get_weather\"}]}","effects":{}}'
+xx_out="$(xx_norm 'llm|responses|gemini|request|ok_tool_call' "$xx_fc")"
+xx_has "text.responses-item-id: a CROSS-PROTOCOL responses hop mints the item id per emit, and the rule takes it" \
+  "$xx_out" 'fc_<ID>' 'fc_jQ1M7rmH7O1GUql08'
+grep -q '"text.responses-item-id"' <<<"$xx_out" \
+  && say PASS "text.responses-item-id: the rule NAMES itself in \`applied\`, so a side that stopped applying it is red on norm.rules" \
+  || say FAIL "text.responses-item-id: fired without joining \`applied\`: $(head -c 200 <<<"$xx_out")"
+xx_out="$(xx_norm 'llm|responses|responses|request|ok_tool_call' "$xx_fc")"
+xx_has "text.responses-item-id: OUT OF SCOPE on the DIAGONAL — the id a same-protocol hop passed through is a contract, not a draw" \
+  "$xx_out" 'fc_jQ1M7rmH7O1GUql08' 'fc_<ID>'
+xx_out="$(xx_norm 'llm|responses|gemini|request|ok_tool_result' "$xx_fc")"
+xx_has "text.responses-item-id: OUT OF SCOPE on turn TWO, whose answer is a message and carries no item id of this shape" \
+  "$xx_out" 'fc_jQ1M7rmH7O1GUql08' 'fc_<ID>'
+
 # 9. THE UN-STRIP HOOK IS UNCHANGED. `--keep json_keys` short-circuits ahead of every rule, scoped or
 #    not: a cell that opted a path out keeps it exactly as raw as it did before these rules existed.
 xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|ok' "$xx_a2a_ok" --keep '{"json_keys":["result.task.status.timestamp","result.task.id"]}')"
@@ -3916,7 +4121,7 @@ EOF
 )"
   IFS=$'\t' read -r xx_total xx_in xx_which <<<"$xx_res"
   if [ "${xx_in:-1}" = 0 ] && [ "${xx_total:-0}" -gt 0 ]; then
-    say PASS "the three scoped rules are in scope for NONE of the ${xx_total} RECORDED ids in the committed golden's ledger — no recorded byte can move"
+    say PASS "every scoped rule is in scope for NONE of the ${xx_total} RECORDED ids in the committed golden's ledger — no recorded byte can move"
   else
     say FAIL "${xx_in} of ${xx_total} committed golden ids are in scope (${xx_which}): these rules would re-open cells they are not about"
   fi

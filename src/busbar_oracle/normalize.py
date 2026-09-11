@@ -185,6 +185,27 @@ stripping a consumer could widen from its own tree is a judge the judged can ins
                              strings under `TS_KEYS` corpus-wide would replace all sixteen and destroy
                              the one cell that proves busbar still emits the literal. Hence: this key,
                              this shape, these cells.
+  text.responses-item-id     busbar MINTS AN ID FOR EVERY RESPONSES OUTPUT ITEM IT EMITS. The IR has
+                             no slot to carry one, so the Responses writer synthesises `fc_…` /
+                             `rs_…` per emit from the OS CSPRNG. `ID_RULES`' own prefix rule takes
+                             `req|resp|msg|run|call|task|sess|rtc`, and `fc` is none of them, so
+                             NOTHING took it. MEASURED, twice, against the published 1.5.5 on
+                             x86_64-unknown-linux-gnu: of the 139 op-axis cells recorded in two
+                             consecutive runs, exactly FIVE differed, all of them
+                             `llm|responses|<e>|request|ok_tool_call` for the five egress dialects
+                             that are NOT responses, each differing in one member --
+                             `output[0].id`, `fc_jQ1M7rmH7O1GUql08rvLrzew0yroPGgqeYXFx05Cv7kwvI36`
+                             against `fc_galWG2g5bJcgPUFFXBpMUFaQMfjfr7VbVBx7rWUQ4pEMToY2`.
+
+                             AND THE SIXTH CELL IS WHY THIS IS SCOPED AND NOT BLANKET.
+                             `llm|responses|responses|request|ok_tool_call` -- the DIAGONAL -- was
+                             byte-identical across both runs, because a same-protocol hop passes the
+                             upstream's own item id through verbatim: it records `fc_oracle`, the
+                             mock's fixed literal. That passthrough IS the cell's contract. A rule
+                             that took `fc_…` corpus-wide would replace it too, and the one cell that
+                             proves busbar does not rewrite an id it was given would be unable to
+                             fail. So: these cells, where the figure is a DRAW, and not the one where
+                             it is a CONTRACT.
   text.retry-after-seconds   HOW LONG UNTIL THE WINDOW ROLLS, rendered INTO the refusal's own prose.
                              MEASURED on `mcp` `over_budget` against 1.6.0: the message reads
                              `… refused by your budget: Limit { group: "h2-oracle", metric:
@@ -266,6 +287,10 @@ ISO_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-
 # keys the corpus holds a fixed ISO literal under (ops.scrape|v1models|anthropic-fp), and on this
 # plane they are unix integers `ts.unix` already takes. One key, and it is the one that was measured.
 A2A_TASK_TS_KEYS = {"timestamp"}
+# busbar's own RESPONSES ITEM identity. 8+ base62 after `fc_`, which is what the writer's
+# synthesiser emits; the prefix is captured in the literal rather than back-referenced because there
+# is exactly one, and a second item prefix appearing later should have to be added ON PURPOSE.
+RESPONSES_ITEM_ID = re.compile(r"\bfc_[0-9A-Za-z]{8,}\b")
 # The seconds-until-retry figure, in the two renderings busbar actually emits. Each replaces the
 # DIGITS ONLY: a refusal that stopped naming a wait, or named it in a third spelling, stays red.
 RETRY_SECONDS_RULES = [
@@ -285,6 +310,11 @@ SCOPED_RULES = {
     # (`over_budget`) and a lane whose breaker is still open (`upstream_down`). Both planes render
     # the figure; no other outcome on either of them has a wait to name.
     "text.retry-after-seconds": re.compile(r"^(a2a|mcp)\|.*\|(over_budget|upstream_down)$"),
+    # CROSS-PROTOCOL ONLY, and the negative lookahead is the whole rule. A responses-ingress hop to
+    # any OTHER dialect rebuilds the body from the IR and mints a fresh item id; the DIAGONAL passes
+    # the upstream's own id through, and that passthrough is the diagonal cell's contract. Measured:
+    # five cells drew, the sixth did not. See the rule's note in the docstring.
+    "text.responses-item-id": re.compile(r"^llm\|responses\|(?!responses\|).*\|ok_tool_call$"),
 }
 
 
@@ -372,6 +402,9 @@ def norm_scalar_str(s: str, applied: set, scoped: frozenset = frozenset()) -> st
     if "text.a2a-task-id" in scoped and A2A_TASK_ID.search(s):
         applied.add("text.a2a-task-id")
         s = A2A_TASK_ID.sub(r"a2a-\1-<TASKID>", s)
+    if "text.responses-item-id" in scoped and RESPONSES_ITEM_ID.search(s):
+        applied.add("text.responses-item-id")
+        s = RESPONSES_ITEM_ID.sub("fc_<ID>", s)
     if "text.retry-after-seconds" in scoped:
         for rx, rep in RETRY_SECONDS_RULES:
             if rx.search(s):
