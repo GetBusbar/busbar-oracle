@@ -92,7 +92,8 @@ _capture_seq = itertools.count()
 # control that resolves to none of them is refused rather than served healthy -- a mock that quietly
 # ignores the outage a cell ordered records the SUCCESS path under that cell's name, identically on
 # the golden and the candidate, so the cell proves the opposite of what it claims.
-VERBS = frozenset({"down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation", "ws-error", "ws-close"})
+VERBS = frozenset({"down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation",
+                   "tool-call", "ws-error", "ws-close"})
 
 
 class UnresolvableControl(Exception):
@@ -191,6 +192,232 @@ def cohere(model, marker):
               "usage": {"billed_units": {"input_tokens": IN_TOK, "output_tokens": OUT_TOK},
                         "tokens": {"input_tokens": IN_TOK, "output_tokens": OUT_TOK}}})
 
+
+# ── THE SIX NON-CHAT (LEAF) OPERATIONS ────────────────────────────────────────────────────────────
+# Every answer below is a pure function of the request, exactly as the chat answers above are: fixed
+# vectors, fixed ids, fixed token counts, no clock and no draw. What each one has to LOOK like is not
+# a choice this file made -- it is what busbar's own reader for that (operation, protocol) parses,
+# read off `crates/busbar-llm-codec/src/<dialect>/handler.rs`, and three of them REFUSE a body that
+# is merely plausible:
+#
+#   * gemini SPEECH is the sharpest: a body that parses as JSON but carries no
+#     `candidates[0].content.parts[0].inlineData.data`, or whose `data` is not valid base64, is
+#     `CodecError::Malformed` -- the reader says so by name. `inlineData` camelCase ONLY.
+#   * openai TRANSCRIPTION discriminates duration-billing from token-billing on `usage.type`, but
+#     the load-bearing key in the token arm is `input_tokens`; a body whose `usage` object is present
+#     and carries neither bills ZERO, which is a money answer nobody wrote down.
+#   * bedrock IMAGE and bedrock RERANK read NO usage at all (`images[]` / `results[]` and nothing
+#     else), so a token object added here would be silently ignored -- their billing is a COUNT.
+#
+# The vectors are written as exact binary fractions (0.125, -0.25) so the JSON round trip is
+# byte-stable on every platform: a value like 0.1 is a different string after a float parse on some
+# runtimes, and a golden made of such a string is a golden about the runtime.
+EMB_VEC = [0.125, -0.25]
+IMG_B64 = "b3JhY2xl"          # "oracle"
+AUDIO_BYTES = b"ID3\x04\x00\x00\x00\x00\x00\x00oracle-audio"  # sniffs to audio/mpeg (`ID3` magic)
+SEARCH_UNITS = 1
+
+
+def openai_embeddings(model, marker):
+    return j({"object": "list", "model": model,
+              "data": [{"object": "embedding", "index": 0, "embedding": EMB_VEC}],
+              "usage": {"prompt_tokens": IN_TOK, "total_tokens": IN_TOK}})
+
+
+def cohere_embeddings(model, marker):
+    return j({"id": "emb-oracle", "embeddings": {"float": [EMB_VEC]},
+              "meta": {"billed_units": {"input_tokens": IN_TOK}}})
+
+
+def gemini_embeddings(model, marker):
+    return j({"embedding": {"values": EMB_VEC},
+              "usageMetadata": {"promptTokenCount": IN_TOK}})
+
+
+def bedrock_embeddings(model, marker):
+    return j({"embedding": EMB_VEC, "inputTextTokenCount": IN_TOK})
+
+
+def openai_image(model, marker):
+    # `created` is a UNIX SECOND on a real OpenAI answer, and a real one here would be the one value
+    # in this file that moves per run -- so it is fixed 0, like every other id and clock in this mock.
+    return j({"created": 0, "data": [{"b64_json": IMG_B64, "revised_prompt": marker}],
+              "usage": {"input_tokens": IN_TOK, "output_tokens": OUT_TOK,
+                        "total_tokens": IN_TOK + OUT_TOK}})
+
+
+def gemini_image(model, marker):
+    return j({"predictions": [{"bytesBase64Encoded": IMG_B64, "mimeType": "image/png"}],
+              "usageMetadata": {"promptTokenCount": IN_TOK, "candidatesTokenCount": OUT_TOK}})
+
+
+def bedrock_image(model, marker):
+    # `images[]` is an array of BARE base64 strings, and the reader takes nothing else from this
+    # body -- no usage member of any spelling is read, so adding one would be decoration.
+    return j({"images": [IMG_B64]})
+
+
+def cohere_rerank(model, marker):
+    return j({"id": "rr-oracle",
+              "results": [{"index": 0, "relevance_score": 0.875},
+                          {"index": 1, "relevance_score": 0.25}],
+              "meta": {"billed_units": {"search_units": SEARCH_UNITS}}})
+
+
+def bedrock_rerank(model, marker):
+    # No `meta` here ON PURPOSE: the bedrock rerank reader does not read `meta.billed_units`, so a
+    # `search_units` written here would be a number no code path can ever see. The one honest
+    # difference from the cohere answer above is exactly that absence.
+    return j({"id": "rr-oracle",
+              "results": [{"index": 0, "relevance_score": 0.875},
+                          {"index": 1, "relevance_score": 0.25}]})
+
+
+def openai_transcription(model, marker):
+    # The TOKEN billing arm: `usage.type` is decorative and `input_tokens` is what is read.
+    return j({"text": marker,
+              "usage": {"type": "tokens", "input_tokens": IN_TOK, "output_tokens": OUT_TOK,
+                        "total_tokens": IN_TOK + OUT_TOK}})
+
+
+def gemini_transcription(model, marker):
+    # NO `audioDurationSeconds`: its presence would switch the reader to duration billing, and the
+    # token arm is the one every other dialect in this corpus bills on.
+    return j({"candidates": [{"content": {"role": "model", "parts": [{"text": marker}]},
+                              "finishReason": "STOP", "index": 0}],
+              "usageMetadata": {"promptTokenCount": IN_TOK, "candidatesTokenCount": OUT_TOK,
+                                "totalTokenCount": IN_TOK + OUT_TOK}})
+
+
+def gemini_speech(model, marker):
+    import base64
+    return j({"candidates": [{"content": {"role": "model", "parts": [
+        {"inlineData": {"mimeType": "audio/L16;codec=pcm;rate=24000",
+                        "data": base64.b64encode(AUDIO_BYTES).decode()}}]},
+        "finishReason": "STOP", "index": 0}]})
+
+
+def openai_moderation(model, marker):
+    return j({"id": "modr-oracle", "model": model,
+              "results": [{"flagged": False, "categories": {"hate": False, "violence": False},
+                           "category_scores": {"hate": 0.0, "violence": 0.0},
+                           "category_applied_input_types": {"hate": ["text"], "violence": ["text"]}}]})
+
+
+def bedrock_invoke_op(raw: bytes) -> str:
+    """Which leaf op a bedrock `/model/{m}/invoke` body names — busbar's OWN discriminator, in order.
+
+    `bedrock/handler.rs`'s `resolve_operation` anchors every scan to the QUOTED JSON KEY and checks
+    rerank FIRST, because a rerank DOCUMENT that merely mentions `inputText` would otherwise steal
+    the request for embeddings. Reproducing that order here is the whole point: a mock that
+    multiplexes this path differently from the product answers the wrong shape to a request busbar
+    thinks it routed somewhere else, and the cell records the mock's disagreement as busbar's bytes.
+    """
+    if b'"query"' in raw and b'"documents"' in raw:
+        return "rerank"
+    if b'"textToImageParams"' in raw:
+        return "image"
+    return "embeddings"
+
+
+def gemini_generate_op(req: dict) -> str:
+    """Which op a gemini `:generateContent` body names — chat, speech or transcription.
+
+    Same discipline as `bedrock_invoke_op`: `gemini/handler.rs`'s `resolve_operation` splits this one
+    path three ways on the BODY, `responseModalities: ["AUDIO"]` first, then an inline audio part.
+    """
+    modal = (((req.get("generationConfig") or {}).get("responseModalities")) or [])
+    if isinstance(modal, list) and "AUDIO" in modal:
+        return "speech"
+    for c in (req.get("contents") or []):
+        for part in (c.get("parts") or []):
+            blob = part.get("inline_data") or part.get("inlineData") or {}
+            mime = blob.get("mime_type") or blob.get("mimeType") or ""
+            if isinstance(mime, str) and mime.startswith("audio/"):
+                return "transcription"
+    return "chat"
+
+
+# ── THE `tool-call` VERB: an answer that CALLS A TOOL instead of talking ──────────────────────────
+# Turn one of the round trip. Every other answer in this file is text; this is the only one whose
+# content is a CALL, and it is the shape no recorded cell has ever contained — the block type, the
+# id, the argument encoding (a JSON STRING on anthropic/openai/responses/cohere, a JSON OBJECT on
+# gemini/bedrock) and the dialect's own stop token, all of which the codec has to translate.
+#
+# THE IDS AND THE ARGUMENTS ARE LITERALS SHARED WITH build-request.py, whose turn-two request echoes
+# them back. Two files hold them because neither is importable from the other (both are hyphenated
+# scripts, not modules), and a selftest holds the two copies to one value rather than trusting them.
+TOOL_NAME = "get_weather"
+TOOL_ARGS = {"city": "paris"}
+TOOL_ARGS_JSON = json.dumps(TOOL_ARGS, separators=(",", ":"), sort_keys=True)
+TOOL_ID_ANTHROPIC = "toolu_oracle0001"
+TOOL_ID_OPENAI = "call_oracle0001"
+TOOL_ID_BEDROCK = "tooluse_oracle0001"
+
+
+def anthropic_tool_call(model, marker):
+    body = json.loads(anthropic(model, marker).decode())
+    body["content"] = [{"type": "tool_use", "id": TOOL_ID_ANTHROPIC, "name": TOOL_NAME,
+                        "input": TOOL_ARGS}]
+    body["stop_reason"] = "tool_use"
+    return j(body)
+
+
+def openai_chat_tool_call(model, marker):
+    body = json.loads(openai_chat(model, marker).decode())
+    body["choices"][0]["message"] = {
+        "role": "assistant", "content": None, "refusal": None,
+        "tool_calls": [{"id": TOOL_ID_OPENAI, "type": "function",
+                        "function": {"name": TOOL_NAME, "arguments": TOOL_ARGS_JSON}}]}
+    body["choices"][0]["finish_reason"] = "tool_calls"
+    return j(body)
+
+
+def openai_responses_tool_call(model, marker):
+    body = json.loads(openai_responses(model, marker).decode())
+    # `status` stays "completed": the Responses API has NO tool-call status token, and the signal is
+    # entirely the output item's TYPE. A mock that invented a status here would be answering a
+    # question the dialect does not ask.
+    body["output"] = [{"type": "function_call", "id": "fc_oracle", "call_id": TOOL_ID_OPENAI,
+                       "name": TOOL_NAME, "arguments": TOOL_ARGS_JSON}]
+    return j(body)
+
+
+def gemini_tool_call(model, marker):
+    body = json.loads(gemini(model, marker).decode())
+    # `finishReason` stays STOP: Gemini's enum has no tool-call member, and busbar PROMOTES the stop
+    # reason to a tool call when a call block is present. Writing anything else would test the
+    # promotion against a signal Google never sends.
+    body["candidates"][0]["content"]["parts"] = [{"functionCall": {"name": TOOL_NAME,
+                                                                   "args": TOOL_ARGS}}]
+    return j(body)
+
+
+def bedrock_tool_call(model, marker):
+    body = json.loads(bedrock(model, marker).decode())
+    body["output"]["message"]["content"] = [{"toolUse": {"toolUseId": TOOL_ID_BEDROCK,
+                                                         "name": TOOL_NAME, "input": TOOL_ARGS}}]
+    body["stopReason"] = "tool_use"
+    return j(body)
+
+
+def cohere_tool_call(model, marker):
+    body = json.loads(cohere(model, marker).decode())
+    body["message"] = {"role": "assistant", "tool_plan": "I will look up the weather.",
+                       "content": [],
+                       "tool_calls": [{"id": TOOL_ID_OPENAI, "type": "function",
+                                       "function": {"name": TOOL_NAME,
+                                                    "arguments": TOOL_ARGS_JSON}}]}
+    body["finish_reason"] = "TOOL_CALL"
+    return j(body)
+
+
+# Keyed by the DOOR the request arrived on, which for this mock is the egress dialect busbar chose.
+TOOL_CALL_ANSWERS = {
+    "anthropic": anthropic_tool_call, "openai-chat": openai_chat_tool_call,
+    "openai-responses": openai_responses_tool_call, "gemini": gemini_tool_call,
+    "bedrock": bedrock_tool_call, "cohere": cohere_tool_call,
+}
 
 # ── streamed variants: a fixed event sequence per dialect (one text delta + a terminal usage) ─────
 def sse(events):
@@ -1020,12 +1247,57 @@ class H(BaseHTTPRequestHandler):
         # text. It touches nothing else: every other dialect and every stream builder is byte-
         # identical under it, so a golden recorded without the verb is unaffected by its existence.
         citation = (ctl == "citation")
+        # `tool-call` answers turn ONE of the round trip: a CALL instead of text, in the door's
+        # own shape. Like `citation` it touches nothing else — every other answer in this file
+        # is byte-identical under it, so a golden recorded without the verb is unaffected.
+        tool_call = (ctl == "tool-call")
+
+        # ── THE SIX LEAF OPS, AHEAD OF THE CHAT ROUTES. Two of them share a path with something
+        # else and are told apart by the BODY, exactly as busbar tells them apart: `/model/{m}/invoke`
+        # multiplexes embeddings/image/rerank, and gemini's `:generateContent` multiplexes
+        # chat/speech/transcription. Both splits are one function each (bedrock_invoke_op,
+        # gemini_generate_op) written off the product's own `resolve_operation`, so this mock cannot
+        # answer one shape to a request busbar believes it routed to another.
+        if p == "/v1/embeddings":
+            return self._send(200, openai_embeddings(model, marker))
+        if p == "/v2/embed":
+            return self._send(200, cohere_embeddings(model, marker))
+        if p.startswith("/v1beta/models/") and (":embedContent" in p or ":batchEmbedContents" in p):
+            return self._send(200, gemini_embeddings(model, marker))
+        if p == "/v1/images/generations":
+            return self._send(200, openai_image(model, marker))
+        if p.startswith("/v1beta/models/") and ":predict" in p:
+            return self._send(200, gemini_image(model, marker))
+        if p == "/v2/rerank":
+            return self._send(200, cohere_rerank(model, marker))
+        if p == "/v1/moderations":
+            return self._send(200, openai_moderation(model, marker))
+        if p in ("/v1/audio/transcriptions", "/v1/audio/translations"):
+            # The REQUEST is multipart/form-data with a per-process random boundary, so `raw` is not
+            # JSON here and `model` fell back to the placeholder. Nothing in the answer reads it.
+            return self._send(200, openai_transcription(model, marker))
+        if p == "/v1/audio/speech":
+            # Raw audio, and the reader takes ANY bytes: it sniffs the mime off the magic number and
+            # bills flat. The `ID3` header is what makes the sniffed mime deterministic.
+            return self._send(200, AUDIO_BYTES, "audio/mpeg")
+        if p.startswith("/model/") and p.endswith("/invoke"):
+            op = bedrock_invoke_op(raw)
+            if op == "rerank":
+                return self._send(200, bedrock_rerank(model, marker))
+            if op == "image":
+                return self._send(200, bedrock_image(model, marker))
+            return self._send(200, bedrock_embeddings(model, marker))
+
         if p == "/v1/messages":
+            if tool_call and not want_stream:
+                return self._send(200, anthropic_tool_call(model, marker))
             if want_stream and stream_error:
                 return self._send(200, anthropic_stream_error(model, marker), "text/event-stream")
             body = anthropic_stream(model, marker) if want_stream else anthropic(model, marker)
             return self._send(200, body, "text/event-stream" if want_stream else "application/json")
         if p == "/v1/chat/completions":
+            if tool_call and not want_stream:
+                return self._send(200, openai_chat_tool_call(model, marker))
             if want_stream and stream_error:
                 return self._send(200, openai_chat_stream_error(model, marker), "text/event-stream")
             body = openai_chat_stream(model, marker) if want_stream else openai_chat(model, marker)
@@ -1051,6 +1323,8 @@ class H(BaseHTTPRequestHandler):
             # change with a re-record attached.
             if want_stream and self.cut:
                 return self._send(200, openai_responses_stream(model, marker), "text/event-stream")
+            if tool_call:
+                return self._send(200, openai_responses_tool_call(model, marker))
             if citation:
                 return self._send(200, openai_responses_citation(model, marker))
             return self._send(200, openai_responses(model, marker))
@@ -1059,14 +1333,26 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, gemini_stream_error(model, marker), "text/event-stream")
             return self._send(200, gemini_stream(model, marker), "text/event-stream")
         if p.startswith("/v1beta/models/") and ":generateContent" in p:
+            # One path, three operations, split on the body — see gemini_generate_op.
+            gop = gemini_generate_op(req)
+            if tool_call and gop == "chat":
+                return self._send(200, gemini_tool_call(model, marker))
+            if gop == "speech":
+                return self._send(200, gemini_speech(model, marker))
+            if gop == "transcription":
+                return self._send(200, gemini_transcription(model, marker))
             return self._send(200, gemini(model, marker))
         if p.startswith("/model/") and p.endswith("/converse-stream"):
             if stream_error:
                 return self._send(200, bedrock_stream_error(model, marker), "application/vnd.amazon.eventstream")
             return self._send(200, bedrock_stream(model, marker), "application/vnd.amazon.eventstream")
         if p.startswith("/model/") and p.endswith("/converse"):
+            if tool_call:
+                return self._send(200, bedrock_tool_call(model, marker))
             return self._send(200, bedrock(model, marker))
         if p == "/v2/chat":
+            if tool_call and not want_stream:
+                return self._send(200, cohere_tool_call(model, marker))
             if want_stream and stream_error:
                 return self._send(200, cohere_stream_error(model, marker), "text/event-stream")
             body = cohere_stream(model, marker) if want_stream else cohere(model, marker)
@@ -1205,6 +1491,101 @@ def selftest() -> int:
         st, ctype, got = post("/v1/responses", {"model": "m-responses", "stream": True}, "stream-error")
         say(st == 200 and ctype == "text/event-stream" and got == responses_stream_error("m-responses", MARKER),
             "…and stream-error still answers its own in-band error stream, unchanged")
+
+        # ── THE SIX LEAF OPS: each door answers ITS OWN shape, and nothing answers a 404 ──────────
+        # Every case names the member busbar's reader for that (op, protocol) actually parses, so a
+        # route that vanished, or a body that lost the one member the reader keys on, is RED here and
+        # not three hours later in a recording. `_LEAF` is (path, body, the member that must be
+        # present at the top level of the answer).
+        _LEAF = [
+            ("/v1/embeddings", {"model": "m-openai-chat", "input": "ping"}, "data"),
+            ("/v2/embed", {"model": "m-cohere", "texts": ["ping"]}, "embeddings"),
+            ("/v1beta/models/m-gemini:embedContent", {"content": {"parts": [{"text": "ping"}]}}, "embedding"),
+            ("/v1/images/generations", {"model": "m-openai-chat", "prompt": "a fox"}, "data"),
+            ("/v1beta/models/m-gemini:predict", {"instances": [{"prompt": "a fox"}]}, "predictions"),
+            ("/v2/rerank", {"model": "m-cohere", "query": "q", "documents": ["a"]}, "results"),
+            ("/v1/moderations", {"model": "m-openai-chat", "input": "ping"}, "results"),
+            ("/v1/audio/transcriptions", {}, "text"),
+        ]
+        for path, body, member in _LEAF:
+            st, ctype, got = post(path, body)
+            ok = st == 200 and ctype == "application/json"
+            try:
+                ok = ok and member in json.loads(got)
+            except ValueError:
+                ok = False
+            say(ok, f"{path} answers 200 JSON carrying `{member}`")
+        st, ctype, got = post("/v1/audio/speech", {"model": "m-openai-chat", "input": "ping"})
+        say(st == 200 and got == AUDIO_BYTES and got.startswith(b"ID3"),
+            "/v1/audio/speech answers RAW audio whose magic bytes sniff to audio/mpeg")
+
+        # `/model/{m}/invoke` MULTIPLEXES, in busbar's own order. The third case is the one the
+        # product's own comment is about: a rerank DOCUMENT that mentions `inputText` must not be
+        # read as an embeddings request, which is why the rerank test comes first there and here.
+        st, _, got = post("/model/m-bedrock/invoke", {"inputText": "ping"})
+        say(st == 200 and "embedding" in json.loads(got), "bedrock /invoke with `inputText` is embeddings")
+        st, _, got = post("/model/m-bedrock/invoke", {"taskType": "TEXT_IMAGE", "textToImageParams": {"text": "a fox"}})
+        say(st == 200 and "images" in json.loads(got), "…with `textToImageParams` it is an image")
+        st, _, got = post("/model/m-bedrock/invoke", {"query": "q", "documents": ["mentions inputText"], "api_version": 2})
+        say(st == 200 and "results" in json.loads(got),
+            "…and a rerank whose DOCUMENT mentions `inputText` is still a rerank, not embeddings")
+
+        # gemini's `:generateContent` multiplexes three ways on the body, exactly as the plane does.
+        st, _, got = post("/v1beta/models/m-gemini:generateContent", {"contents": [{"parts": [{"text": "ping"}]}]})
+        say("text" in json.loads(got)["candidates"][0]["content"]["parts"][0],
+            "gemini :generateContent with a text part is CHAT")
+        st, _, got = post("/v1beta/models/m-gemini:generateContent",
+                          {"contents": [{"parts": [{"text": "x"}]}],
+                           "generationConfig": {"responseModalities": ["AUDIO"]}})
+        say("inlineData" in json.loads(got)["candidates"][0]["content"]["parts"][0],
+            "…with responseModalities AUDIO it is SPEECH (inlineData, camelCase, valid base64)")
+        st, _, got = post("/v1beta/models/m-gemini:generateContent",
+                          {"contents": [{"parts": [{"inline_data": {"mime_type": "audio/mpeg", "data": "aGk="}}]}]})
+        say(json.loads(got).get("usageMetadata", {}).get("candidatesTokenCount") == OUT_TOK
+            and "text" in json.loads(got)["candidates"][0]["content"]["parts"][0],
+            "…and with an inline AUDIO part it is TRANSCRIPTION, billed on tokens")
+        # The gemini speech answer is the one body busbar's reader REFUSES when it is merely
+        # plausible: no `inlineData` pointer, or `data` that is not valid base64, is Malformed by
+        # name. Prove the bytes this mock emits clear both bars rather than assuming they do.
+        import base64 as _b64
+        _sp = json.loads(gemini_speech("m-gemini", MARKER).decode())
+        _blob = _sp["candidates"][0]["content"]["parts"][0]["inlineData"]
+        # The decode is the ASSERTION, so its failure has to be a FAIL ROW and not a traceback:
+        # an exception escaping here would take the whole selftest down and the cases after it would
+        # never run, which reads as "the suite broke" rather than "this rule was violated".
+        try:
+            _decoded = _b64.b64decode(_blob["data"], validate=True)
+        except Exception:
+            _decoded = None
+        say(_decoded == AUDIO_BYTES and "pcm" in _blob["mimeType"],
+            "…and its inlineData.data is valid base64 of the fixed audio, under a pcm mimeType")
+
+        # ── THE `tool-call` VERB: a CALL on every door, and the healthy answer unmoved ────────────
+        _TOOLDOORS = [
+            ("/v1/messages", {"model": "m-anthropic"}, anthropic, anthropic_tool_call),
+            ("/v1/chat/completions", {"model": "m-openai-chat"}, openai_chat, openai_chat_tool_call),
+            ("/v1/responses", {"model": "m-responses"}, openai_responses, openai_responses_tool_call),
+            ("/v1beta/models/m-gemini:generateContent", {"contents": [{"parts": [{"text": "ping"}]}]},
+             gemini, gemini_tool_call),
+            ("/model/m-bedrock/converse", {"messages": []}, bedrock, bedrock_tool_call),
+            ("/v2/chat", {"model": "m-cohere"}, cohere, cohere_tool_call),
+        ]
+        for path, body, healthy, called in _TOOLDOORS:
+            m = body.get("model") or "m-gemini"
+            st, _, got = post(path, body, "tool-call")
+            say(st == 200 and got == called(m, MARKER) and TOOL_NAME.encode() in got,
+                f"{path} under `tool-call` answers a CALL to {TOOL_NAME}")
+            st, _, got2 = post(path, body)
+            say(got2 == healthy(m, MARKER),
+                f"…and {path}'s healthy answer is byte-identical without the verb")
+
+        # EVERY ANSWER IN THIS FILE IS A PURE FUNCTION OF THE REQUEST. The oracle records a cell only
+        # when two runs agree byte for byte, so a mock that drew anything per call would make every
+        # new cell unrecordable — and would do it silently, as a flake.
+        for path, body, member in _LEAF:
+            a = post(path, body)[2]
+            b = post(path, body)[2]
+            say(a == b, f"{path} answers the SAME bytes twice")
     finally:
         srv.shutdown()
         srv.server_close()
