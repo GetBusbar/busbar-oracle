@@ -65,10 +65,19 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$BIN" ] && [ -n "$OUT" ] || { echo "usage: $0 --bin <busbar> --out <dir> [--filter re]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "record.sh needs jq" >&2; exit 2; }
-# `streams` joins the natively-recorded planes with the ws driver (0.3.12): the served-session
-# family is recorded from a real socket by capture-ws.py, so it selects like llm and core do rather
-# than going through a conformance rig. mcp/a2a still do -- they have no recorder here at all.
-case "$PLANE" in llm|core|streams|all) ;; *) echo "record.sh: planes recorded natively: llm, core (cli/config/scrape/crosscut/admin/boot), streams (served ws sessions), all; mcp/a2a go through the conformance rigs" >&2; exit 2 ;; esac
+# NO PLANE IS REFUSED BY NAME. This was `case "$PLANE" in llm|core|streams|all) ;; *) exit 2`, which
+# made `--plane mcp` and `--plane a2a` unsayable — the first of the two by-plane refusals that left
+# 1,382 cells unowed by category. The planes that are RECORDABLE is a question about drivers, and it
+# is answered per cell, by the cell (see the plane driver and plane-subject.sh's scenario table).
+# What is checked here is only that the plane asked for is one the CORPUS has, so a typo is a refusal
+# rather than a recording of nothing — "zero rows is red" caught that late and named the wrong cause.
+if [ "$PLANE" != all ]; then
+  _known_planes="$(jq -r '[.cells[].plane] | unique | join(" ")' "${data}/cells.json" 2>/dev/null)"
+  case " $_known_planes " in
+    *" $PLANE "*) ;;
+    *) echo "record.sh: no cell in ${data}/cells.json has plane '${PLANE}'; the corpus has: ${_known_planes:-<unreadable>} (or 'all')" >&2; exit 2 ;;
+  esac
+fi
 
 LISTEN_PORT="${ORACLE_LISTEN_PORT:-48811}" ADMIN_PORT="${ORACLE_ADMIN_PORT:-48812}" MOCK_PORT="${ORACLE_MOCK_PORT:-48781}"
 
@@ -484,6 +493,63 @@ corpus_providers_for() {  # <repo-relative corpus config path>
 #                 boot      start the process; a refusal exits; a warning boots — wait for /healthz on
 #                           spare ports, then stop; capture the log tail
 #   exec.config   baseline | none | missing | migrated:<corpus-path> | mutation:<id> (fixtures/boot-mutations.json)
+# ── plane cells: a cell driven through its plane's CONFORMANCE RIG SUBJECT ───────────────────────
+# The rig is the PRODUCT's (scripts/<plane>-subject/), it is invoked through its own library exactly
+# as the product's gating scenarios invoke it, and what comes back is the recorder's ordinary capture
+# shape — see plane-subject.sh, which owns every decision about what a rig can drive.
+#
+# THE THREE ANSWERS, AND NONE OF THEM IS "THIS PLANE IS PROVEN SOMEWHERE ELSE":
+#   recorded        the rig drove the cell; normalize it and count it like any other.
+#   a NAMED GAP     the rig is not in this tree, or has no scenario for this cell. The row is the
+#                   SAME `needs_fixture` gap row the fixture gate above writes — same title, same
+#                   "the fixture this cell needs is not in the tree yet" — with the rig NAMED in it,
+#                   so nothing downstream can tell a missing rig apart from any other missing
+#                   fixture, and both are owed.
+#   red             the rig broke. A driver that gave up is never a recorded cell (the same rule
+#                   script_cell_verdict states for script drivers).
+# ── A CELL ID IS NOT A PATH ─────────────────────────────────────────────────────────────────────
+# This was `safe="${id//|/__}"`, which escapes the ONE separator the llm and core planes' ids happen
+# to use. The mcp plane's method names are HTTP-ish — `tools/call`, `GET /mcp (open SSE stream)` —
+# and the a2a plane's include `GET /.well-known/agent-card.json`, so a cell id carries slashes and
+# spaces. With `/` left alone, `$OUT/cells/$safe.json` is a path into a directory that does not
+# exist: the raw tree grew `raw/mcp__…__tools/call__ok/` and every normalize into
+# `cells/mcp__…__tools/call__ok.json` failed on a missing directory. Nothing noticed for as long as
+# it did because the by-plane skip meant no id with a slash in it had ever reached this line.
+#
+# The rule: the pipe becomes `__` exactly as before — so not one existing recording's filename moves
+# — and anything else that is not a portable filename character becomes `_`. Proven injective over
+# the whole corpus (no two ids share a filename) and proven to leave every committed golden filename
+# byte-identical; see the replay selftest, which drives THIS function and the two Python mirrors of
+# it in diff-cells.py and merge-recordings.py against each other.
+cell_file_name() {  # <cell id> -> the basename its recording is written under
+  local s="${1//|/__}"
+  printf '%s\n' "${s//[!A-Za-z0-9._+-]/_}"
+}
+
+record_plane_cell() {  # <id> <cell-json> <raw-dir> <safe> <plane>
+  local id="$1" cell="$2" raw="$3" safe="$4" plane="$5" out rc kid
+  # a rig boots its own busbar on its own free ports; this recording's must not be holding state or
+  # CPU while it does (the same reason a script cell stops it).
+  stop_busbar
+  out="$(BUSBAR_BIN="$BIN" bash "${here}/plane-subject.sh" "$plane" "$cell" "$raw" 2>"$raw/plane.err")"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) record "$id" SKIP "UNSUPPORTED: $(jq -r .why <<<"$cell" | cut -c1-140)" \
+         "named gap: the fixture this cell needs is not in the tree yet — the ${plane} conformance rig subject, ${out}"; return ;;
+    4) record "$id" SKIP "UNSUPPORTED: $(jq -r .why <<<"$cell" | cut -c1-140)" \
+         "named gap: the fixture this cell needs is not in the tree yet — ${out}"; return ;;
+    *) record "$id" FAIL "the ${plane} rig subject could not drive this cell" \
+         "${out} $(tail -c 200 "$raw/plane.err" | tr '\n' ' ')"; return ;;
+  esac
+  [ -s "$raw/captured.json" ] || { record "$id" FAIL "the ${plane} rig subject wrote no capture" \
+    "$(tail -c 300 "$raw/plane.err" | tr '\n' ' ')"; return; }
+  kid="$(cat "$raw/key-id" 2>/dev/null)"
+  python3 "${here}/normalize.py" "$raw/captured.json" ${kid:+--key-id "$kid"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
+    || { rm -f "$OUT/cells/$safe.json"; record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return; }
+  record "$id" PASS "${plane} rig scenario ${out}: HTTP $(cat "$raw/status" 2>/dev/null); usage Δ $(jq -c '.effects.usage' "$OUT/cells/$safe.json")" ""
+  n=$((n + 1))
+}
+
 record_exec_cell() {  # <id> <cell-json> <raw-dir> <safe>
   local id="$1" cell="$2" raw="$3" safe="$4" mode cfg cfgfile envkv rc corpus_prov
   mode="$(jq -r '.exec.mode' <<<"$cell")"; cfg="$(jq -r '.exec.config // "baseline"' <<<"$cell")"
@@ -1136,7 +1202,7 @@ n=0
 #   `.outcome | tostring` and the `// ` defaults reproduce `jq -r` exactly, including "null".
 while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture plane cell; do
   [ -z "$FILTER" ] || [[ "$id" =~ $FILTER ]] || continue
-  safe="${id//|/__}"
+  safe="$(cell_file_name "$id")"
   # A FRESH DIRECTORY PER CELL, AND THE STALE CELL FILE WITH IT. Nothing removed anything: `mkdir -p
   # "$OUT/cells" "$OUT/raw"` created, `: >"$LEDGER"` truncated the ledger and that was all. So
   # re-recording into an existing --out — the documented way to replace a stale cell, and the
@@ -1172,9 +1238,22 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
     *) record "$id" FAIL "needs_fixture is not a fixture gate: '${needs_fixture}'" \
          "the fixture gate takes true, false, null, or the NAME of an environment variable (a shell identifier). A value it cannot read cannot say whether this cell's fixture is present, and a cell recorded without its fixture freezes the missing backend's answer into the golden."; continue ;;
   esac
-  case "$plane" in
-    mcp|a2a) record "$id" SKIP "UNSUPPORTED: ${plane} is proven by its conformance rig, not recorded here" "named gap on the golden, never owed"; continue ;;
-  esac
+  # A CELL WITH NO DRIVER OF ITS OWN IS DRIVEN BY ITS PLANE'S RIG SUBJECT. This was
+  #   case "$plane" in mcp|a2a) record "$id" SKIP "…proven by its conformance rig, not recorded
+  #     here" "named gap on the golden, never owed"; continue ;; esac
+  # — a decision taken about the PLANE before anything looked at the cell, and the phrase "never
+  # owed" is the part the ledger's kind rule refuses: nothing downstream could notice the category
+  # swallowing a cell the rig can in fact drive. Now the cell goes to the rig, and what comes back is
+  # either a recording or a NAMED gap that names the rig. See plane-subject.sh.
+  # `$driver` is already defaulted to `llm` by the selection query, so the question "did this cell
+  # declare a driver of its own?" has to be asked of the cell itself.
+  declared_driver="$(jq -r '.driver // empty' <<<"$cell")"
+  if [ -z "$declared_driver" ]; then
+    case "$plane" in
+      llm|core|streams) ;;   # the natively-recorded planes: no declared driver means the llm driver
+      *) record_plane_cell "$id" "$cell" "$raw" "$safe" "$plane"; continue ;;
+    esac
+  fi
   if [ "$driver" = exec ]; then
     record_exec_cell "$id" "$cell" "$raw" "$safe"; continue
   fi

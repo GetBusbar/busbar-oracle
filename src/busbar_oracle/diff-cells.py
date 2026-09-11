@@ -781,7 +781,13 @@ def check_compare_policy(cells: list, path: str) -> None:
 
 
 def safe_name(cell_id: str) -> str:
-    return cell_id.replace("|", "__")
+    # The pipe becomes `__` exactly as it always has (no existing recording's filename moves) and
+    # anything else that is not a portable filename character becomes `_`: an mcp method is
+    # `tools/call` and an a2a one is `GET /.well-known/agent-card.json`, so a cell id carries
+    # slashes and spaces, and an unescaped `/` makes this a PATH instead of a name. record.sh's
+    # cell_file_name() and merge-recordings.py state the same rule; the replay selftest drives all
+    # three against each other.
+    return re.sub(r"[^A-Za-z0-9._+-]", "_", cell_id.replace("|", "__"))
 
 
 def load_ledger(d: str) -> dict:

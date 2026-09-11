@@ -74,7 +74,9 @@ What is normalized (each rule is a named entry in `applied`):
                       about the egress request, is deliberately left byte-exact so this cell can
                       catch a dropped tool list, a mangled system prompt, an injected max_tokens, or
                       a client header that leaked upstream when it should not have)
-  text.port           127.0.0.1:<port> in any text body or stderr line: listen, admin and mock ports are the harness's
+  text.port           127.0.0.1:<port> in any text body, stderr line, HEADER VALUE or JSON string: listen,
+                      admin, mock and conformance-rig ports are the harness's draw, never busbar's contract
+                      (:1 and :9 are left alone — single-digit ports are config constants a cell is about)
   egress.host         effects.egress[].headers.host: the mock's port becomes <PORT> (chosen per recording)
   stderr.platform-capability
                       whole stderr LINES that report a capability of the RECORDING HOST rather than
@@ -230,11 +232,32 @@ def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers
     return dict(sorted(out.items()))
 
 
+# A LOOPBACK ADDRESS WITH AN EPHEMERAL PORT IS THE HARNESS'S, NEVER BUSBAR'S CONTRACT — which is
+# exactly what the `text.port` rule has said since it was written, for text bodies and stderr lines
+# alone. Header values and JSON strings carry the same thing and were never covered: a plane cell
+# recorded through a conformance rig gets `www-authenticate: Bearer resource_metadata=
+# "http://127.0.0.1:<ephemeral>/.well-known/oauth-protected-resource/a2a"`, and the rigs take FREE
+# ports (h2_free_ports) rather than the recorder's fixed ones, so that header was a different string
+# on every run. Measured: two back-to-back recordings of `a2a|jsonrpc|server|client|SendMessage|
+# unauthenticated` and its mcp twin differed in that one header and nothing else.
+#
+# `\d{2,5}` is the original rule's, and it is load-bearing: `127.0.0.1:1` and `127.0.0.1:9` appear in
+# the committed golden as CONFIG CONSTANTS a cell is about (a port chosen to be unreachable), and a
+# rule that ate those would erase the contract instead of a per-run draw. Proven in the replay
+# selftest: applying this rule to every string of every one of the committed golden's cells changes
+# not one byte, because every loopback port it already holds is either `<PORT>` already or one of
+# those two constants.
+LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:\d{2,5}\b")
+
+
 def norm_scalar_str(s: str, applied: set) -> str:
     for rx, rep in ID_RULES:
         if rx.search(s):
             applied.add("id.wire" if "<ID>" in rep else "audit.hash")
             s = rx.sub(rep, s)
+    if LOOPBACK_PORT.search(s):
+        applied.add("text.port")
+        s = LOOPBACK_PORT.sub("127.0.0.1:<PORT>", s)
     return s
 
 
@@ -455,7 +478,6 @@ def sort_pool_lines(lines: list, applied: set) -> list:
 
 
 VERSION_KV = re.compile(r'version="(\d+\.\d+\.\d+)(?:-[0-9A-Za-z.]+)?"')
-LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:\d{2,5}\b")
 
 # ── LINES THAT SAY WHAT THE HOST CAN DO, NOT WHAT BUSBAR DID ─────────────────────────────────────
 # A `[warn]` that reports a CAPABILITY OF THE MACHINE is not a behaviour of the binary. The golden is

@@ -86,10 +86,21 @@ may genuinely disagree about a cell's bytes. It is REPORTED, not silently accept
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def cell_file_name(cell_id: str) -> str:
+    """The basename a cell's recording is written under. The pipe becomes `__` exactly as it always
+    has (so no existing recording's filename moves) and anything else that is not a portable filename
+    character becomes `_` — an mcp method is `tools/call`, an a2a one is
+    `GET /.well-known/agent-card.json`, and an unescaped `/` makes this a PATH instead of a name.
+    record.sh's cell_file_name() and diff-cells.py's safe_name() state the same rule; the replay
+    selftest drives all three against each other."""
+    return re.sub(r"[^A-Za-z0-9._+-]", "_", cell_id.replace("|", "__"))
 
 # What actually identifies the source of a recording. `binary` (a filesystem path) is deliberately
 # NOT here; `harness_rev` and `host_triple` are handled separately because they are reportable
@@ -409,7 +420,7 @@ def _part(root, name, cell_ids, **meta_over):
         for c in cell_ids:
             f.write(f"{c}\tPASS\tidentical\t\n")
     for c in cell_ids:
-        with open(os.path.join(d, "cells", c.replace("|", "__") + ".json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(d, "cells", cell_file_name(c) + ".json"), "w", encoding="utf-8") as f:
             json.dump({"status": 200}, f)
     return d
 

@@ -3453,6 +3453,245 @@ else
   wait "$qq6_pid" 2>/dev/null || true
 fi
 
+# (rr) A CELL ID IS NOT A PATH.
+#
+# The recorder wrote every cell to `${id//|/__}` — the ONE separator the llm and core planes' ids
+# happen to use. The mcp plane's method names are HTTP-ish (`tools/call`,
+# `GET /mcp (open SSE stream)`) and a2a's include `GET /.well-known/agent-card.json`, so a cell id
+# carries slashes and spaces. With `/` left alone `$OUT/cells/$safe.json` is a PATH into a directory
+# that does not exist: measured, the raw tree grew `raw/mcp__…__tools/call__ok/` and all five
+# recordable mcp cells died as `normalize.py failed`. Nothing had ever noticed because the by-plane
+# skip meant no id with a slash in it had reached that line since the corpus grew one.
+#
+# Three files name a cell's file and they must not disagree: record.sh writes it, diff-cells.py
+# looks for it, merge-recordings.py writes it into a merged golden. All three are driven here.
+eval "$(sed -n '/^cell_file_name()/,/^}/p' "${here}/record.sh")"
+if ! declare -F cell_file_name >/dev/null 2>&1; then
+  say FAIL "record.sh has no cell_file_name(): the id-to-filename rule is not a rule anything can drive"
+else
+rr_py() {  # <module-file> <function-source-name> <cell-id>
+  python3 - "$1" "$2" "$3" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rr_mod", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(getattr(mod, sys.argv[2])(sys.argv[3]))
+EOF
+}
+rr_agree() {  # <cell-id> <want> <label>
+  local id="$1" want="$2" label="$3" a b c
+  a="$(cell_file_name "$id")"
+  b="$(rr_py "${here}/diff-cells.py" safe_name "$id" 2>/dev/null)"
+  c="$(rr_py "${here}/merge-recordings.py" cell_file_name "$id" 2>/dev/null)"
+  if [ "$a" = "$want" ] && [ "$b" = "$want" ] && [ "$c" = "$want" ]; then
+    say PASS "cell file name: $label -> $want (recorder, differ and merger agree)"
+  else
+    say FAIL "cell file name: $label -> record.sh '$a', diff-cells.py '$b', merge-recordings.py '$c'; want '$want'"
+  fi
+}
+rr_agree 'llm|anthropic|anthropic|request|ok' 'llm__anthropic__anthropic__request__ok' \
+  "an llm id, which must keep the name every committed recording already uses"
+rr_agree 'cli|--version' 'cli__--version' "a cli id: dashes and dots are filename characters and stay"
+rr_agree 'mcp|streamable-http|server|client|tools/call|ok' 'mcp__streamable-http__server__client__tools_call__ok' \
+  "an mcp id whose METHOD carries a slash"
+rr_agree 'a2a|grpc|client|client|GET /.well-known/agent-card.json|ok' \
+  'a2a__grpc__client__client__GET__.well-known_agent-card.json__ok' \
+  "an a2a id with a space, a slash and a leading dot in its method"
+# …and nothing it produces may be a path or hide a traversal
+rr_bad=""
+for rr_id in 'mcp|x|tools/call|ok' 'a2a|x|GET /mcp (open SSE stream)|ok' 'x|../../etc/passwd'; do
+  case "$(cell_file_name "$rr_id")" in */*) rr_bad="${rr_bad} ${rr_id};" ;; esac
+done
+[ -z "$rr_bad" ] \
+  && say PASS "cell file name: no id produces a name with a path separator in it" \
+  || say FAIL "cell file name: these ids still produce paths:${rr_bad}"
+
+# THE ONE THING THAT MUST NOT MOVE: every id the PRODUCT'S corpus holds keeps the filename it has,
+# and no two ids collide on one. Driven against the real cells.json when there is one — a tool run
+# from a bare checkout has no corpus and says so rather than passing vacuously.
+rr_corpus="${BUSBAR_ORACLE_DATA:-}/cells.json"
+if [ -f "$rr_corpus" ]; then
+  rr_out="$(python3 - "$rr_corpus" "${here}/diff-cells.py" <<'EOF'
+import collections, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("rr_d", sys.argv[2])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+import os
+ids = [c["id"] for c in json.load(open(sys.argv[1]))["cells"]]
+names = {d.safe_name(i) + ".json" for i in ids}
+gold = os.path.join(os.path.dirname(sys.argv[1]), "golden")
+committed = set()
+for root, _dirs, files in os.walk(gold):
+    if os.path.basename(root) == "cells":
+        committed |= set(files)
+moved = sorted(committed - names)
+dup = {k: v for k, v in collections.Counter(d.safe_name(i) for i in ids).items() if v > 1}
+print(f"{len(ids)}\t{len(moved)}\t{len(dup)}\t{len(committed)}")
+EOF
+)"
+  IFS=$'\t' read -r rr_n rr_moved rr_dup rr_committed <<<"$rr_out"
+  if [ "${rr_moved:-1}" = 0 ] && [ "${rr_dup:-1}" = 0 ] && [ "${rr_committed:-0}" -gt 0 ]; then
+    say PASS "cell file name: every one of the ${rr_committed} committed golden cell files is still the name this rule gives its id, over the product's ${rr_n} cells, and no two ids collide on one"
+  else
+    say FAIL "cell file name: ${rr_moved} committed golden cell file(s) would no longer be found, ${rr_dup} pair(s) of ids collide, ${rr_committed} committed file(s) measured"
+  fi
+else
+  skip "cell file name vs the product's corpus: \$BUSBAR_ORACLE_DATA names no cells.json, so no real corpus was measured"
+fi
+fi
+
+# (ss) NO PLANE IS REFUSED BY NAME.
+#
+# record.sh refused mcp and a2a twice: at the argument gate (`case "$PLANE" in llm|core|streams|all`)
+# and again per cell (`mcp|a2a) record "$id" SKIP "…is proven by its conformance rig, not recorded
+# here" "named gap on the golden, never owed"`). Both decided about the PLANE before anything looked
+# at the cell, so 1,382 cells were unowed by category — and "never owed" is the part the ledger's
+# kind rule refuses, because nothing downstream could ever notice the category swallowing a cell the
+# rig can in fact drive. Measured after the lift: eleven of them record.
+# …read off the CODE, never the comment above it: this file's own case text quotes the line it
+# deleted, and a grep over the whole file would be satisfied by the explanation of the fix.
+ss_src="$(grep -v '^[[:space:]]*#' "${here}/record.sh")"
+ss_bad=""
+grep -q 'case "$PLANE" in llm|core|streams|all)' <<<"$ss_src" \
+  && ss_bad="${ss_bad} the argument gate still refuses a plane by name;"
+grep -q 'mcp|a2a) record "$id" SKIP' <<<"$ss_src" \
+  && ss_bad="${ss_bad} the per-cell by-plane SKIP is still there;"
+grep -q 'never owed' <<<"$ss_src" \
+  && ss_bad="${ss_bad} record.sh still writes a gap that says 'never owed';"
+grep -q 'record_plane_cell "$id" "$cell" "$raw" "$safe" "$plane"' <<<"$ss_src" \
+  || ss_bad="${ss_bad} no cell is dispatched to its plane's rig subject;"
+[ -z "$ss_bad" ] \
+  && say PASS "record.sh refuses no plane by name and sends a cell with no driver of its own to its plane's rig" \
+  || say FAIL "record.sh's plane handling:${ss_bad}"
+
+# (tt) WHAT A RIG CAN DRIVE IS STATED, AND WHAT IT CANNOT IS A NAMED GAP THAT NAMES THE RIG.
+# Drives the REAL plane_scenario() out of plane-subject.sh, extracted by name.
+eval "$(sed -n '/^plane_scenario()/,/^}/p' "${here}/plane-subject.sh")"
+if ! declare -F plane_scenario >/dev/null 2>&1; then
+  say FAIL "plane-subject.sh has no plane_scenario(): what a rig can drive is not a rule anything can drive"
+else
+tt_case() {  # <plane> <cell-json> <want-scenario|-> <label>
+  local plane="$1" cell="$2" want="$3" label="$4" got why
+  got="$(plane_scenario "$plane" "$cell")"
+  why="${got#*$(printf '\t')}"
+  case "$got" in -*) got="-" ;; esac
+  if [ "$got" != "$want" ]; then
+    say FAIL "plane scenario: $label -> '$got', want '$want'"
+  elif [ "$want" = "-" ] && ! grep -qE 'h2_(call|boot)|scripts/[a-z0-9]+-subject' <<<"$why"; then
+    say FAIL "plane scenario: $label is a gap that does not NAME the rig: '$why'"
+  else
+    say PASS "plane scenario: $label -> ${want/-/a named gap naming the rig}"
+  fi
+}
+tt_a2a='"plane":"a2a","transport":"jsonrpc","method":"SendMessage","obligation":"handle"'
+tt_mcp='"plane":"mcp","transport":"streamable-http","method":"tools/call","obligation":"handle"'
+for o in ok unauthenticated out_of_scope over_budget malformed upstream_down; do
+  tt_case a2a "{$tt_a2a,\"outcome\":\"$o\"}" "$o" "a2a jsonrpc SendMessage $o"
+done
+for o in ok unauthenticated out_of_scope over_budget malformed; do
+  tt_case mcp "{$tt_mcp,\"outcome\":\"$o\"}" "$o" "mcp streamable-http tools/call $o"
+done
+tt_case mcp "{$tt_mcp,\"outcome\":\"upstream_down\"}" - \
+  "mcp upstream_down (its mock honours no fault control, so a pass here would be a healthy upstream recorded as an outage)"
+tt_case a2a "{$tt_a2a,\"outcome\":\"no-agents-configured\"}" - \
+  "a2a no-agents-configured (h2_boot always registers and approves the probe agent)"
+tt_case a2a "{\"transport\":\"grpc\",\"method\":\"SendMessage\",\"obligation\":\"handle\",\"outcome\":\"ok\"}" - \
+  "a transport the rig has no client for"
+tt_case a2a "{\"transport\":\"jsonrpc\",\"method\":\"GetTask\",\"obligation\":\"handle\",\"outcome\":\"ok\"}" - \
+  "a method the rig never sends"
+tt_case a2a "{\"transport\":\"jsonrpc\",\"method\":\"SendMessage\",\"obligation\":\"issue\",\"outcome\":\"ok\"}" - \
+  "the ISSUE half of the exchange, which the rig observes as egress but cannot send"
+tt_case voice '{"transport":"x","method":"y","obligation":"handle","outcome":"ok"}' - \
+  "a plane with no rig subject at all"
+# a2a's decode refusal has its own outcome name and must reach the same mechanism
+tt_case a2a "{$tt_a2a,\"outcome\":\"undecodable-body\"}" malformed \
+  "a2a undecodable-body, the reachability pair's decode half"
+fi
+
+# (uu) …and the driver must hand the recorder the recorder's OWN capture shape, by the recorder's own
+# capture.py, never a second assembler of its own.
+uu_src="$(cat "${here}/plane-subject.sh")"
+uu_bad=""
+grep -q 'capture.py' <<<"$uu_src" || uu_bad="${uu_bad} the rig's answer is not assembled by capture.py;"
+grep -q 'source "$lib"' <<<"$uu_src" || uu_bad="${uu_bad} the product's rig library is not sourced;"
+grep -q 'scripts/${plane}-subject/h2-lib.sh' <<<"$uu_src" || uu_bad="${uu_bad} the rig path is not derived from the plane name;"
+grep -q 'h2_boot ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own boot is not used;"
+grep -q 'h2_mint ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own mint is not used;"
+grep -q 'h2_bind ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own audience binding is not used;"
+[ -z "$uu_bad" ] \
+  && say PASS "the plane driver sources the PRODUCT's rig library, drives its own helpers, and assembles through capture.py" \
+  || say FAIL "plane-subject.sh:${uu_bad}"
+# …and the recorder must turn the two refusals into the ORDINARY needs_fixture gap row, naming the
+# rig — not a row of its own that says a plane is proven somewhere else.
+uu_rec="$(sed -n '/^record_plane_cell()/,/^}/p' "${here}/record.sh")"
+uu_bad2=""
+[ "$(grep -c 'named gap: the fixture this cell needs is not in the tree yet' <<<"$uu_rec")" -eq 2 ] \
+  || uu_bad2="${uu_bad2} the rig-missing and no-scenario answers are not both the ordinary needs_fixture gap row;"
+grep -q 'record "$id" FAIL' <<<"$uu_rec" || uu_bad2="${uu_bad2} a rig that BROKE is not red;"
+[ -z "$uu_bad2" ] \
+  && say PASS "a plane with no rig, and a cell with no scenario, are the ordinary needs_fixture gap row with the rig named in it" \
+  || say FAIL "record.sh's plane driver:${uu_bad2}"
+
+# (vv) `text.port` COVERS A HEADER AND A JSON STRING, AND MOVES NOT ONE COMMITTED BYTE.
+# The rule's own sentence — a loopback address with an ephemeral port is the harness's draw, never
+# busbar's contract — was implemented for text bodies and stderr lines only. A plane cell recorded
+# through a conformance rig answers `www-authenticate: Bearer resource_metadata="http://127.0.0.1:
+# <ephemeral>/…"`, and the rigs take FREE ports rather than the recorder's fixed ones, so two
+# back-to-back recordings of the same cell differed in exactly that header and nothing else.
+vv_norm() {  # <json> -> the normalized cell
+  printf '%s' "$1" >"$W/vv-in.json"
+  python3 "${here}/normalize.py" "$W/vv-in.json"
+}
+vv_out="$(vv_norm '{"status":401,"headers":{"www-authenticate":"Bearer resource_metadata=\"http://127.0.0.1:54501/.well-known/oauth-protected-resource/a2a\""},"body":"{\"detail\":\"see http://127.0.0.1:54501/x\"}","effects":{}}')"
+if grep -q '127.0.0.1:<PORT>' <<<"$vv_out" && ! grep -q '54501' <<<"$vv_out" && grep -q 'text.port' <<<"$vv_out"; then
+  say PASS "text.port: an ephemeral loopback port in a HEADER and in a JSON string is the harness's draw, and the rule says so"
+else
+  say FAIL "text.port: the ephemeral port survived normalization: $(head -c 200 <<<"$vv_out")"
+fi
+# …and the two single-digit ports a cell is ABOUT are left alone
+vv_out2="$(vv_norm '{"status":200,"headers":{},"body":"{\"url\":\"https://127.0.0.1:9/oracle-plugin.tar.gz\",\"addr\":\"127.0.0.1:1\"}","effects":{}}')"
+grep -q '127.0.0.1:9' <<<"$vv_out2" && grep -q '127.0.0.1:1' <<<"$vv_out2" \
+  && say PASS "text.port: a single-digit loopback port is a config constant the cell is about, and survives" \
+  || say FAIL "text.port: ate a single-digit port, which is a contract and not a draw: $(head -c 200 <<<"$vv_out2")"
+
+# THE PROOF THAT NO COMMITTED BYTE MOVES: apply the rule to every string of every cell of the
+# committed golden and require the result to be the file itself. A normalizer change that cannot
+# show this is a change that re-opens cells it is not about.
+vv_corpus="${BUSBAR_ORACLE_DATA:-}/golden"
+if [ -d "$vv_corpus" ]; then
+  vv_moved="$(python3 - "$vv_corpus" "${here}/normalize.py" <<'EOF'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("vv_n", sys.argv[2])
+n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
+def walk(x):
+    if isinstance(x, dict):
+        return {walk(k): walk(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [walk(i) for i in x]
+    if isinstance(x, str):
+        return n.norm_scalar_str(x, set())
+    return x
+moved, total = [], 0
+for root, _d, files in os.walk(sys.argv[1]):
+    if os.path.basename(root) != "cells":
+        continue
+    for f in files:
+        total += 1
+        doc = json.load(open(os.path.join(root, f)))
+        if walk(doc) != doc:
+            moved.append(f)
+print(f"{total}\t{len(moved)}\t{' '.join(moved[:3])}")
+EOF
+)"
+  IFS=$'\t' read -r vv_total vv_n vv_which <<<"$vv_moved"
+  if [ "${vv_n:-1}" = 0 ] && [ "${vv_total:-0}" -gt 0 ]; then
+    say PASS "text.port: re-applied to every string of all ${vv_total} committed golden cells, not one byte moves"
+  else
+    say FAIL "text.port: ${vv_n} of ${vv_total} committed golden cells would change (${vv_which}) — the rule re-opens cells it is not about"
+  fi
+else
+  skip "text.port vs the committed golden: \$BUSBAR_ORACLE_DATA names no golden/ to re-apply the rule over"
+fi
+
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN${skips:+ (with $skips skipped)}" || { echo "replay selftest: RED ($fails)"; exit 1; }
