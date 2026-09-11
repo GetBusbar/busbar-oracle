@@ -3567,12 +3567,49 @@ grep -q 'record_plane_cell "$id" "$cell" "$raw" "$safe" "$plane"' <<<"$ss_src" \
   && say PASS "record.sh refuses no plane by name and sends a cell with no driver of its own to its plane's rig" \
   || say FAIL "record.sh's plane handling:${ss_bad}"
 
-# (tt) WHAT A RIG CAN DRIVE IS STATED, AND WHAT IT CANNOT IS A NAMED GAP THAT NAMES THE RIG.
-# Drives the REAL plane_scenario() out of plane-subject.sh, extracted by name.
+# (tt) WHAT A RIG CAN DRIVE IS ASKED OF THE RIG, AND WHAT IT CANNOT IS A NAMED GAP THAT NAMES IT.
+# Drives the REAL plane_scenario() and the REAL ps_rig_can() out of plane-subject.sh, by name.
+#
+# TWO SYNTHETIC RIG TREES, because the fact under test is "this function reads the tree it is
+# pointed at", and a case that could only ever see ONE tree cannot tell that apart from a function
+# that remembers an answer. They are the two trees that actually existed: `tt_can` is a rig with the
+# mcp fault control (H2_CONTROL_FILE set at boot, handed to the mock, and a scenario that arms it)
+# and an h2_boot that admits `lane-absent`; `tt_cannot` is the rig BEFORE either — and note that its
+# a2a side still has the control, because the a2a mock always did, so "cannot" is never a blanket
+# property of a tree.
+tt_rig() {  # <dir> <mcp-control: yes|no> <mcp-scenario: yes|no> <a2a-boot-args>
+  local d="$1" mcp_ctl="$2" mcp_scn="$3" a2a_args="$4"
+  mkdir -p "$d/scripts/a2a-subject" "$d/scripts/mcp-subject"
+  { echo 'h2_boot() {'
+    echo '  local dir="$1" groups_yaml="$2" agents="${3:-probe}"'
+    echo '  case "$agents" in'
+    echo "    ${a2a_args}) ;;"
+    echo '    *) return 2 ;;'
+    echo '  esac'
+    echo '  H2_CONTROL_FILE="$dir/agent.control"'
+    echo '  node "${H2_HERE}/h2-mock-agent.mjs" "$H2_AGENT_PORT" "$H2_CONTROL_FILE" &'
+    echo '}'; } >"$d/scripts/a2a-subject/h2-lib.sh"
+  printf 'printf %s > "$H2_CONTROL_FILE"\n' "'down'" >"$d/scripts/a2a-subject/h2-route-failover.sh"
+  { echo 'h2_boot() {'
+    echo '  local dir="$1" groups_yaml="$2"'
+    [ "$mcp_ctl" = yes ] && echo '  H2_CONTROL_FILE="$dir/upstream.control"'
+    [ "$mcp_ctl" = yes ] && echo '  node "${H2_HERE}/h2-mock-upstream.mjs" "$H2_UPSTREAM_PORT" "$H2_CONTROL_FILE" &'
+    echo '}'; } >"$d/scripts/mcp-subject/h2-lib.sh"
+  [ "$mcp_scn" = yes ] && printf 'printf %s > "$H2_CONTROL_FILE"\n' "'down'" >"$d/scripts/mcp-subject/h2-upstream-outage.sh"
+  return 0
+}
+tt_rig "$W/tt-can"    yes yes 'probe|none|lane-absent'
+tt_rig "$W/tt-cannot" no  no  'probe|none'
+eval "$(sed -n '/^ps_rig_can()/,/^}/p' "${here}/plane-subject.sh")"
 eval "$(sed -n '/^plane_scenario()/,/^}/p' "${here}/plane-subject.sh")"
 if ! declare -F plane_scenario >/dev/null 2>&1; then
   say FAIL "plane-subject.sh has no plane_scenario(): what a rig can drive is not a rule anything can drive"
+elif ! declare -F ps_rig_can >/dev/null 2>&1; then
+  say FAIL "plane-subject.sh has no ps_rig_can(): what a rig can drive is remembered, not asked"
 else
+# ps_repo is what both functions read the tree through. Every case below sets it, so no case can
+# quietly be answered by whatever tree this selftest happens to be running inside.
+ps_repo="$W/tt-can"
 tt_case() {  # <plane> <cell-json> <want-scenario|-> <label>
   local plane="$1" cell="$2" want="$3" label="$4" got why
   got="$(plane_scenario "$plane" "$cell")"
@@ -3594,10 +3631,69 @@ done
 for o in ok unauthenticated out_of_scope over_budget malformed; do
   tt_case mcp "{$tt_mcp,\"outcome\":\"$o\"}" "$o" "mcp streamable-http tools/call $o"
 done
+# ── THE PROBE'S TWO BRANCHES, one rig present and one absent, for both rows. ───────────────────
+# A gap is reported ONLY when the probe says the rig cannot. Before this release both of these rows
+# were a `-` decided in this file, so the RIG-PRESENT half below is red against every earlier tool:
+# the mcp fault control shipped in the product and the row stayed a named gap anyway.
+ps_repo="$W/tt-cannot"
 tt_case mcp "{$tt_mcp,\"outcome\":\"upstream_down\"}" - \
-  "mcp upstream_down (its mock honours no fault control, so a pass here would be a healthy upstream recorded as an outage)"
+  "mcp upstream_down where the rig has NO fault control (a pass here would freeze a healthy upstream under the name of an outage)"
+tt_case a2a "{$tt_a2a,\"outcome\":\"upstream_down\"}" upstream_down \
+  "a2a upstream_down on that SAME tree — its mock always had the control, so 'cannot' is never a property of a whole tree"
+ps_repo="$W/tt-can"
+tt_case mcp "{$tt_mcp,\"outcome\":\"upstream_down\"}" upstream_down \
+  "mcp upstream_down where the rig DOES expose the control — the row stops being a gap because the rig changed, not because this file did"
+# The a2a row: `lane-absent` is the argument the sharper configuration needs. Absent -> gap.
+ps_repo="$W/tt-cannot"
 tt_case a2a "{$tt_a2a,\"outcome\":\"no-agents-configured\"}" - \
-  "a2a no-agents-configured (h2_boot always registers and approves the probe agent)"
+  "a2a no-agents-configured where h2_boot does not admit \`lane-absent\` (its \`none\` boots a deployment fronting NOTHING, which is a different configuration wearing this row's name)"
+# Present -> the probe stops speaking and the ORDINARY gates decide. This cell is `obligation: issue`
+# in the product's corpus, so it is still a gap — for the reason that actually blocks it, stated by
+# the rule that owns it, instead of a rig capability the rig no longer lacks.
+ps_repo="$W/tt-can"
+tt_case a2a "{$tt_a2a,\"outcome\":\"no-agents-configured\"}" no_lane \
+  "a2a no-agents-configured on a rig that DOES admit \`lane-absent\`, as the handle half: the probe falls silent and the rig's own configuration is what drives it"
+tt_case a2a "{\"transport\":\"jsonrpc\",\"method\":\"SendMessage\",\"obligation\":\"issue\",\"outcome\":\"no-agents-configured\"}" - \
+  "…and as the corpus's own ISSUE half it is STILL a gap, on the obligation that blocks it rather than on the rig"
+# ── EACH LEG OF THE upstream-fault PROBE IS LOAD-BEARING ───────────────────────────────────────
+# "A capability with no caller is a claim" is the product's own sentence for why its fault control
+# shipped together with the scenario that arms it; the probe holds the rig to it.
+tt_leg() {  # <dir> <mcp-control> <mcp-scenario> <want: can|cannot> <label>
+  tt_rig "$5" "$2" "$3" 'probe|none'
+  local saved="$ps_repo"; ps_repo="$5"
+  if ps_rig_can mcp upstream-fault; then got=can; else got=cannot; fi
+  ps_repo="$saved"
+  [ "$got" = "$4" ] && say PASS "rig probe: $1 -> $4" || say FAIL "rig probe: $1 -> $got, want $4"
+}
+tt_leg "h2_boot sets no control file at all"                     no  no  cannot "$W/tt-leg1"
+tt_leg "h2_boot sets a control file but no scenario arms it"     yes no  cannot "$W/tt-leg2"
+tt_leg "the control is set, handed to the mock, and armed by a scenario" yes yes can "$W/tt-leg3"
+# …and the rig LIBRARY, which is where the variable is DEFINED, never counts as its own caller.
+mkdir -p "$W/tt-leg4/scripts/mcp-subject"
+cp "$W/tt-leg3/scripts/mcp-subject/h2-lib.sh" "$W/tt-leg4/scripts/mcp-subject/h2-lib.sh"
+tt_saved="$ps_repo"; ps_repo="$W/tt-leg4"
+ps_rig_can mcp upstream-fault \
+  && say FAIL "rig probe: h2-lib.sh counted as its own caller — every rig that merely NAMES the variable would read as a rig that uses it" \
+  || say PASS "rig probe: h2-lib.sh is not its own caller (the library defines the control; a scenario has to arm it)"
+ps_repo="$tt_saved"
+# THE ANSWERS ARE NOT IN THIS FILE ANY MORE. Read off the CODE with its comments stripped, exactly
+# as case (ss) does, so the prose above cannot satisfy the grep that guards the prose.
+tt_src="$(grep -v '^[[:space:]]*#' "${here}/plane-subject.sh")"
+tt_bad=""
+grep -q 'honours no fault control' <<<"$tt_src" \
+  && tt_bad="${tt_bad} the mcp fault-control answer is still a literal in the tool;"
+grep -q 'always registers and approves' <<<"$tt_src" \
+  && tt_bad="${tt_bad} the a2a h2_boot answer is still a literal in the tool;"
+grep -q 'ps_rig_can "$plane" upstream-fault' <<<"$tt_src" \
+  || tt_bad="${tt_bad} the upstream_down arm does not ask the rig;"
+grep -q 'ps_rig_can a2a lane-absent' <<<"$tt_src" \
+  || tt_bad="${tt_bad} the no-agents-configured arm does not ask the rig;"
+[ "$(grep -c 'ps_rig_can' <<<"$tt_src")" -ge 3 ] \
+  || tt_bad="${tt_bad} ps_rig_can is not the one place a rig capability is decided;"
+[ -z "$tt_bad" ] \
+  && say PASS "plane-subject.sh remembers no rig capability: both rows ask ps_rig_can, which reads the tree" \
+  || say FAIL "plane-subject.sh:${tt_bad}"
+ps_repo="$W/tt-can"
 tt_case a2a "{\"transport\":\"grpc\",\"method\":\"SendMessage\",\"obligation\":\"handle\",\"outcome\":\"ok\"}" - \
   "a transport the rig has no client for"
 tt_case a2a "{\"transport\":\"jsonrpc\",\"method\":\"GetTask\",\"obligation\":\"handle\",\"outcome\":\"ok\"}" - \
@@ -3620,6 +3716,7 @@ grep -q 'source "$lib"' <<<"$uu_src" || uu_bad="${uu_bad} the product's rig libr
 grep -q 'scripts/${plane}-subject/h2-lib.sh' <<<"$uu_src" || uu_bad="${uu_bad} the rig path is not derived from the plane name;"
 grep -q 'h2_boot ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own boot is not used;"
 grep -q 'h2_mint ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own mint is not used;"
+grep -q 'boot_args+=(lane-absent)' <<<"$uu_src" || uu_bad="${uu_bad} the no_lane scenario names no boot argument, so ps_rig_can would green a configuration nothing boots;"
 grep -q 'h2_bind ' <<<"$uu_src" || uu_bad="${uu_bad} the rig's own audience binding is not used;"
 [ -z "$uu_bad" ] \
   && say PASS "the plane driver sources the PRODUCT's rig library, drives its own helpers, and assembles through capture.py" \
@@ -3695,6 +3792,189 @@ EOF
 else
   skip "text.port vs the committed golden: \$BUSBAR_ORACLE_DATA names no golden/ to re-apply the rule over"
 fi
+
+# (xx) THE THREE SCOPED NORM RULES: EACH FIRES FOR THE CELLS IT NAMES, AND FOR NO OTHERS.
+#
+# Every other rule in normalize.py applies to every cell. These three take out a figure that is a
+# per-run draw on one plane's answers and a real CONTRACT somewhere else in the same corpus, so each
+# is scoped to a regex over the cell id and the id arrives on `--cell`. The cases below drive the
+# REAL normalizer over the bytes 1.6.0 actually answered through the product's own h2 rigs.
+xx_norm() {  # <cell-id-or-empty> <captured-json> -> the normalized cell
+  local cid="$1"; shift
+  printf '%s' "$1" >"$W/xx-in.json"
+  python3 "${here}/normalize.py" "$W/xx-in.json" ${cid:+--cell "$cid"} "${@:2}"
+}
+xx_has() {  # <label> <normalized> <want-present> <want-absent>
+  local label="$1" out="$2" want="$3" nope="$4"
+  if grep -qF -- "$want" <<<"$out" && ! grep -qF -- "$nope" <<<"$out"; then
+    say PASS "$label"
+  else
+    say FAIL "$label: $(head -c 260 <<<"$out")"
+  fi
+}
+# MEASURED, not invented: 1.6.0 (aarch64-apple-darwin) through scripts/a2a-subject/h2-lib.sh, the
+# `ok` answer. `a2a-probe-546485ee16d77208` is busbar's OWN issued task identity
+# (receive.rs `format!("a2a-{}-{}", agent_id, uuid_like(body, now))`), carried twice, and
+# `2026-09-11T06:16:32.127Z` is the moment the task moved.
+xx_a2a_ok='{"status":200,"headers":{"content-type":"application/json"},"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"a2a-probe-546485ee16d77208\",\"contextId\":\"a2a-probe-546485ee16d77208\",\"status\":{\"state\":\"TASK_STATE_COMPLETED\",\"timestamp\":\"2026-09-11T06:16:32.127Z\"}}}}","effects":{}}'
+# …and the `upstream_down` answer, which carries the same identity a third way.
+xx_a2a_down='{"status":502,"headers":{"content-type":"application/json"},"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32006,\"message\":\"the backend agent did not complete this task\",\"data\":[{\"@type\":\"type.googleapis.com/google.rpc.ResourceInfo\",\"resourceName\":\"a2a-probe-4723836f63a47579\",\"resourceType\":\"a2a.busbar/task\"}]}}","effects":{}}'
+# mcp `over_budget`: the seconds remaining in the UTC day, rendered INTO the refusal's own prose.
+xx_mcp_budget='{"status":429,"headers":{"content-type":"application/json"},"body":"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"round 0 of this dispatch to MCP server `probe` was refused by your budget: Limit { group: \\\"h2-oracle\\\", metric: \\\"requests\\\", window: Some(\\\"day\\\"), pool: None, downgrade_to: None, retry_after: Some(63690) }.\",\"data\":{\"reason\":\"budget_exhausted\"}}}","effects":{}}'
+
+# 1. text.a2a-task-id — IN SCOPE it goes, and the AGENT NAME stays (which agent a task was issued
+#    against is the plane's contract; only the 16 hex digits are the draw).
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|ok' "$xx_a2a_ok")"
+xx_has "text.a2a-task-id: busbar's issued a2a task identity is a per-run draw and the rule takes the DIGITS, keeping the agent" \
+  "$xx_out" 'a2a-probe-<TASKID>' '546485ee16d77208'
+grep -q '"text.a2a-task-id"' <<<"$xx_out" \
+  && say PASS "text.a2a-task-id: the rule NAMES itself in \`applied\`, so a side that stopped applying it is red on norm.rules" \
+  || say FAIL "text.a2a-task-id: fired without joining \`applied\`: $(head -c 200 <<<"$xx_out")"
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|upstream_down' "$xx_a2a_down")"
+xx_has "text.a2a-task-id: the same identity in a refusal's \`resourceName\`" "$xx_out" 'a2a-probe-<TASKID>' '4723836f63a47579'
+# 2. …and OUT OF SCOPE it does not. Same bytes, an llm cell id: nothing moves.
+xx_out="$(xx_norm 'llm|openai|openai|request|ok' "$xx_a2a_ok")"
+xx_has "text.a2a-task-id: OUT OF SCOPE (an llm cell id) the same string is left exactly as recorded" \
+  "$xx_out" '546485ee16d77208' '<TASKID>'
+# 3. …and with NO --cell at all, which is every caller that existed before this rule did.
+xx_out="$(xx_norm '' "$xx_a2a_ok")"
+xx_has "text.a2a-task-id: no cell id, no scoped rule — a caller that does not say which cell this is gets the behaviour that existed before" \
+  "$xx_out" '546485ee16d77208' '<TASKID>'
+
+# 4. json.a2a-task-timestamp — the task's RFC 3339 moment, in scope.
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|ok' "$xx_a2a_ok")"
+xx_has "json.a2a-task-timestamp: the a2a task's own RFC 3339 moment is the clock, not a contract" \
+  "$xx_out" '"timestamp":"<TS>"' '2026-09-11T06:16'
+# 5. THE REASON IT IS SCOPED, AND THE CELL THAT PROVES IT. `ops.scrape|v1models|anthropic-fp` records
+#    `created_at: "1970-01-01T00:00:00Z"` for every model — a FIXED LITERAL busbar emits, which the
+#    route inventory states as the contract. A rule that took ISO strings under TS_KEYS corpus-wide
+#    would replace all sixteen and destroy the one cell that proves busbar still emits it.
+xx_models='{"status":200,"headers":{"content-type":"application/json"},"body":"{\"data\":[{\"type\":\"model\",\"id\":\"m-anthropic\",\"display_name\":\"m-anthropic\",\"created_at\":\"1970-01-01T00:00:00Z\"}],\"has_more\":false}","effects":{}}'
+for xx_id in 'ops.scrape|v1models|anthropic-fp' 'a2a|jsonrpc|server|client|SendMessage|ok'; do
+  xx_out="$(xx_norm "$xx_id" "$xx_models")"
+  xx_has "json.a2a-task-timestamp: the corpus's REAL ISO contract (created_at 1970-01-01T00:00:00Z) survives under \`$xx_id\`" \
+    "$xx_out" '1970-01-01T00:00:00Z' '<TS>'
+done
+# 6. …and `ts.unix` still owns the INTEGER under the very same key, in scope. The new rule adds a
+#    shape; it never renames what an existing rule already took.
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|ok' '{"status":200,"headers":{},"body":"{\"timestamp\":1757570192}","effects":{}}')"
+if grep -q '"timestamp":0' <<<"$xx_out" && grep -q '"ts.unix"' <<<"$xx_out" && ! grep -q 'a2a-task-timestamp' <<<"$xx_out"; then
+  say PASS "json.a2a-task-timestamp: an INTEGER under the same key is still \`ts.unix\`'s, under its own name"
+else
+  say FAIL "json.a2a-task-timestamp: took a key ts.unix already owns: $(head -c 200 <<<"$xx_out")"
+fi
+
+# 7. text.retry-after-seconds — the digits go, the sentence stays.
+xx_out="$(xx_norm 'mcp|streamable-http|server|client|tools/call|over_budget' "$xx_mcp_budget")"
+xx_has "text.retry-after-seconds: seconds-to-window-roll rendered into a refusal's prose is a wall-clock draw" \
+  "$xx_out" 'retry_after: Some(<RETRY_SECS>)' '63690'
+grep -q 'refused by your budget' <<<"$xx_out" && grep -q 'budget_exhausted' <<<"$xx_out" \
+  && say PASS "text.retry-after-seconds: only the DIGITS are replaced — a refusal that stopped naming a wait, or stopped being about a budget, is still red" \
+  || say FAIL "text.retry-after-seconds: ate more than the figure: $(head -c 260 <<<"$xx_out")"
+# the second rendering busbar emits, the breaker-open refusals' `Retry after {n}s`
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|upstream_down' '{"status":503,"headers":{},"body":"{\"message\":\"agent `probe` is unavailable: its circuit breaker is open after repeated backend failures; busbar did not dispatch this request. Retry after 27s\"}","effects":{}}')"
+xx_has "text.retry-after-seconds: the breaker-open rendering (\`Retry after {n}s\`) on the same rule" \
+  "$xx_out" 'Retry after <RETRY_SECS>s' 'after 27s'
+# 8. …and OUT OF SCOPE (an mcp `ok` cell) the same message is left alone.
+xx_out="$(xx_norm 'mcp|streamable-http|server|client|tools/call|ok' "$xx_mcp_budget")"
+xx_has "text.retry-after-seconds: OUT OF SCOPE the same figure is left exactly as recorded" "$xx_out" '63690' '<RETRY_SECS>'
+
+# 9. THE UN-STRIP HOOK IS UNCHANGED. `--keep json_keys` short-circuits ahead of every rule, scoped or
+#    not: a cell that opted a path out keeps it exactly as raw as it did before these rules existed.
+xx_out="$(xx_norm 'a2a|jsonrpc|server|client|SendMessage|ok' "$xx_a2a_ok" --keep '{"json_keys":["result.task.status.timestamp","result.task.id"]}')"
+if grep -q '2026-09-11T06:16:32.127Z' <<<"$xx_out" && grep -q '"id":"a2a-probe-546485ee16d77208"' <<<"$xx_out" \
+   && grep -q '"contextId":"a2a-probe-<TASKID>"' <<<"$xx_out" && grep -q 'keep.json_key' <<<"$xx_out"; then
+  say PASS "--keep json_keys still OVERRIDES every scoped rule on the paths it names, and only on those"
+else
+  say FAIL "--keep json_keys no longer overrides the scoped rules: $(head -c 300 <<<"$xx_out")"
+fi
+
+# 10. NOT ONE COMMITTED BYTE CAN MOVE, and it is proven the strongest way available: no id in the
+#     committed golden's ledger is in scope for ANY of the three. A scoped rule that cannot move a
+#     committed cell needs no re-recording argument at all.
+xx_led="$(ls "${data}"/golden/*/ledger.tsv 2>/dev/null | head -1)"
+if [ -n "$xx_led" ]; then
+  xx_res="$(python3 - "${here}/normalize.py" "$xx_led" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("xx_n", sys.argv[1])
+n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
+total = inscope = 0
+which = []
+for line in open(sys.argv[2]):
+    parts = line.rstrip("\n").split("\t")
+    # PASS rows ONLY: those are the ids with a committed cell FILE, which is the set whose bytes a
+    # normalizer change could move. A SKIP row has no file to re-open.
+    if len(parts) < 2 or parts[1] != "PASS": continue
+    cid = parts[0]
+    if not cid: continue
+    total += 1
+    s = n.scoped_rules(cid)
+    if s:
+        inscope += 1; which.append(cid)
+print(f"{total}\t{inscope}\t{' '.join(which[:3])}")
+EOF
+)"
+  IFS=$'\t' read -r xx_total xx_in xx_which <<<"$xx_res"
+  if [ "${xx_in:-1}" = 0 ] && [ "${xx_total:-0}" -gt 0 ]; then
+    say PASS "the three scoped rules are in scope for NONE of the ${xx_total} RECORDED ids in the committed golden's ledger — no recorded byte can move"
+  else
+    say FAIL "${xx_in} of ${xx_total} committed golden ids are in scope (${xx_which}): these rules would re-open cells they are not about"
+  fi
+else
+  say FAIL "no golden ledger under ${data}/golden/*/ledger.tsv: the no-committed-byte-moves proof could not be taken, and a scoped rule nobody measured against the corpus is a rule nobody scoped"
+fi
+# 11. …and each rule NAMES CELLS THAT EXIST. A scope matching nothing is a rule with no subject, and
+#     one matching everything is not a scope.
+if [ -f "${data}/cells.json" ]; then
+  python3 - "${here}/normalize.py" "${data}/cells.json" >"$W/xx-scope.txt" <<'EOF'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("xx_n", sys.argv[1])
+n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
+doc = json.load(open(sys.argv[2]))
+cells = doc["cells"] if isinstance(doc, dict) else doc
+ids = [c["id"] for c in cells]
+bad, absent, counts = [], [], []
+for name, rx in n.SCOPED_RULES.items():
+    m = sum(1 for i in ids if rx.search(i))
+    counts.append(f"{name} {m}/{len(ids)}")
+    # A scope that names EVERY cell is not a scope, and that is a defect in the TABLE — true of any
+    # corpus, so it is red anywhere.
+    if m == len(ids): bad.append(f"{name} names every cell, which is not a scope")
+    # A scope that names none may simply mean THIS corpus has no cell on that plane (the tool's own
+    # fixture product has two cells and neither is a plane cell). That is a fact about the corpus,
+    # not about the table, so it is said out loud rather than scored either way.
+    elif m == 0: absent.append(name)
+print("; ".join(bad))
+print(" ".join(absent))
+print("; ".join(counts))
+EOF
+  xx_bad_scope="$(sed -n 1p "$W/xx-scope.txt")"
+  xx_absent="$(sed -n 2p "$W/xx-scope.txt")"
+  xx_counts="$(sed -n 3p "$W/xx-scope.txt")"
+  if [ -n "$xx_bad_scope" ]; then
+    say FAIL "scope: $xx_bad_scope"
+  elif [ -n "$xx_absent" ]; then
+    skip "scoped-rule subjects: this corpus (${data}/cells.json) holds no cell in scope for ${xx_absent}, so that the rule names a real cell is not proven by this run [${xx_counts}]"
+  else
+    say PASS "each scoped rule names a real, proper subset of the corpus: ${xx_counts}"
+  fi
+else
+  say FAIL "no cells.json under ${data}: the scopes could not be measured against the corpus they are scopes over"
+fi
+# 12. …and the SCOPE IS TOOL CODE, not something the judged tree can widen. Read off the code.
+xx_src="$(grep -v '^[[:space:]]*#' "${here}/normalize.py")"
+xx_bad=""
+grep -q '^SCOPED_RULES = {' <<<"$xx_src" || xx_bad="${xx_bad} there is no SCOPED_RULES table;"
+grep -qE 'BUSBAR_ORACLE|os\.environ|getenv|import os' <<<"$xx_src" \
+  && xx_bad="${xx_bad} normalize.py reads the environment or the data directory, so what it strips would no longer be decided by the tool alone;"
+grep -q 'scoped = scoped_rules(cell_id)' <<<"$xx_src" || xx_bad="${xx_bad} normalize() does not derive the scope from the cell id;"
+[ "$(grep -c 'normalize.py" .*--cell "\$id"\|normalize.py" --cell "\$id"' "${here}/record.sh")" -ge 5 ] \
+  || xx_bad="${xx_bad} record.sh does not pass --cell at every normalize call site, so a cell would be normalized out of its own scope;"
+grep -q 'normalize.py" "$raw/captured.json" --cell "$id"' "${here}/renormalize.sh" \
+  || xx_bad="${xx_bad} renormalize.sh does not pass --cell, so a renormalization would write a cell the recorder never made;"
+[ -z "$xx_bad" ] \
+  && say PASS "the scopes are tool code: a table in normalize.py, keyed off the cell id every call site passes, and nothing normalize.py loads" \
+  || say FAIL "scoped rules:${xx_bad}"
 
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"

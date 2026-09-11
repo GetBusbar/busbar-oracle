@@ -72,17 +72,70 @@ ps_repo="${BUSBAR_ORACLE_PRODUCT_ROOT:-$(cd "${ps_here}/../.." && pwd)}"
 #                        over_budget      a `requests: 1` group and a second call
 #                                         (h2-admit-refusal.sh's mechanism)
 #                        malformed        a body the plane cannot decode
-#                        upstream_down    the a2a rig's mock agent honours a `down` control file
-#                                         (h2-mock-agent.mjs). The mcp rig's h2-mock-upstream.mjs has
-#                                         no fault control at all, so mcp's upstream_down is a gap
-#                                         naming that file — not a silent pass against a healthy
-#                                         upstream, which is the failure mode this whole release is
-#                                         about.
+#                        upstream_down    the rig's mock honours a `down` control file. WHETHER IT
+#                                         DOES IS ASKED, NOT REMEMBERED — see ps_rig_can below.
 #                        undecodable-body a2a's own name for the decode refusal, one cell of the
 #                                         reachability pair
-# `no-agents-configured` is deliberately absent: h2_boot always registers the `probe` agent and
-# refuses to return until the admin API reports it approved, so the rig cannot boot the configuration
-# that cell is about. It is a gap naming h2_boot, which is where the ability would have to appear.
+#
+# ── ASK THE RIG. DO NOT REMEMBER WHAT IT COULD NOT DO LAST TIME. ────────────────────────────────
+#
+# Two arms of this table used to be HARD-CODED facts about the product tree, decided here and true
+# only until somebody changed the rig:
+#
+#   * `mcp:upstream_down` — "h2-mock-upstream.mjs honours no fault control". That was measured and
+#     correct when it was written, and it stopped being true the day the mcp rig grew the control its
+#     a2a sibling always had (h2_boot's H2_CONTROL_FILE, handed to the mock, and
+#     h2-upstream-outage.sh, which is the scenario that keeps it honest). The product half closed and
+#     the row stayed a gap, because the tool was still reciting a measurement instead of taking one.
+#   * `a2a:no-agents-configured` — "h2_boot always registers and approves the `probe` agent". h2_boot
+#     has since taken a third argument, and the configuration it reaches TURNED OUT NOT TO BE THE
+#     CELL'S: booted with no `agents:` key the plane mounts no routes at all, so a submission is
+#     refused 401 in AUTH, upstream of the meter, and the key's usage reads `requests: 0` — while the
+#     cell's own `why` states `{"requests": 1}`, a caller who drew a slot and bought nothing. Two
+#     configurations wore one name. The sharper one, and the one this row is actually about, is a
+#     REGISTERED agent whose LANE IS ABSENT: fronted, admitted, metered, and resolving to nothing.
+#
+# A capability is a fact about the tree this tool is POINTED AT, so it is read off that tree every
+# time the question is asked. `ps_rig_can` is the only place that asks, a gap is printed only when it
+# answers no, and when it answers yes the ordinary gates below decide — which is how a cell that is
+# ALSO blocked by something more fundamental (an `issue` obligation, a transport with no client) goes
+# on being refused for that reason and not for a rig capability it no longer lacks.
+ps_rig_can() {  # <plane> <capability> -> 0 the rig in this tree exposes it, 1 it does not
+  # DECLARED THEN ASSIGNED, not both on the `local` line: `local a="$1" b="${a}x"` reads `a` before
+  # bash has finished the declaration under `set -u`, and this function's first act would abort the
+  # recorder on an unbound variable rather than answer a question about the rig.
+  local plane="$1" cap="$2" dir lib boot
+  dir="${ps_repo}/scripts/${plane}-subject"
+  lib="${dir}/h2-lib.sh"
+  [ -f "$lib" ] || return 1
+  boot="$(sed -n '/^h2_boot()/,/^}/p' "$lib")"
+  [ -n "$boot" ] || return 1
+  case "$cap" in
+    upstream-fault)
+      # THE MECHANISM IS THE CONTROL FILE, and it takes all three of these to be a mechanism rather
+      # than a variable: h2_boot must SET H2_CONTROL_FILE, must HAND it to the mock it starts (a
+      # control no mock reads is a path), and the plane must ship a scenario that ARMS it — "a
+      # capability with no caller is a claim", which is the product's own sentence for why the mcp
+      # control shipped together with h2-upstream-outage.sh. All three are read off the tree.
+      grep -q 'H2_CONTROL_FILE=' <<<"$boot" || return 1
+      grep -qE 'node .*"\$H2_CONTROL_FILE"' <<<"$boot" || return 1
+      # …and a scenario that ARMS it. The library itself is excluded by name: it is where the
+      # variable is DEFINED, so counting it would make every rig that has the variable look like a
+      # rig that uses it.
+      grep -l 'H2_CONTROL_FILE' "${dir}"/h2-*.sh 2>/dev/null | grep -qv '/h2-lib\.sh$' || return 1
+      return 0 ;;
+    lane-absent)
+      # h2_boot's own argument guard is the contract: it names the configurations it can boot and
+      # refuses every other word. So the question "can this rig boot a registered agent whose lane is
+      # absent?" is asked of the guard, by the name the row needs — never by counting arguments or by
+      # assuming that any third argument must be this one. `none` is NOT this: it boots a deployment
+      # that fronts nothing, which is the OTHER configuration that was wearing this row's name.
+      sed -n '/case "\$agents" in/,/esac/p' <<<"$boot" | grep -qE '(^|[[:space:]|(])lane-absent([[:space:]|)])' || return 1
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 plane_scenario() {  # <plane> <cell-json> -> "<scenario>" | "-<TAB><why>"
   local plane="$1" cell="$2" transport method outcome obligation want_transport want_method entry
   transport="$(jq -r '.transport // ""' <<<"$cell")"
@@ -102,11 +155,18 @@ plane_scenario() {  # <plane> <cell-json> -> "<scenario>" | "-<TAB><why>"
   if [ "$method" != "$want_method" ]; then
     printf -- '-\t%s sends %s only; this cell is %s\n' "$entry" "$want_method" "${method:-<none>}"; return 0
   fi
+  # ── WHAT THE RIG CAN DO, ASKED OF THE RIG. A gap here ONLY when the probe answers no. ─────────
   case "$plane:$outcome" in
+    *:upstream_down)
+      if ! ps_rig_can "$plane" upstream-fault; then
+        printf -- '-\th2_boot in scripts/%s-subject/h2-lib.sh exposes no fault control (H2_CONTROL_FILE, set at boot and handed to the mock it starts, with a scenario beside it that arms it), so this plane has no way to make its upstream refuse — and a cell driven against a healthy upstream would freeze a success under the name of an outage\n' "$plane"
+        return 0
+      fi ;;
     a2a:no-agents-configured)
-      printf -- '-\th2_boot in scripts/a2a-subject/h2-lib.sh always registers and approves the `probe` agent and does not return until the admin API says so, so it cannot boot the agent-less configuration this cell is about\n'; return 0 ;;
-    mcp:upstream_down)
-      printf -- '-\tscripts/mcp-subject/h2-mock-upstream.mjs honours no fault control, so this plane has no way to make its upstream refuse (the sibling a2a rig has one in h2-mock-agent.mjs)\n'; return 0 ;;
+      if ! ps_rig_can a2a lane-absent; then
+        printf -- '-\th2_boot in scripts/a2a-subject/h2-lib.sh boots no configuration with a REGISTERED agent whose LANE IS ABSENT — the one this row is about, where the submission is fronted, admitted and METERED and draws a requests-only row. Its `none` argument boots a deployment that fronts nothing, which is a different configuration wearing the same name: measured on 1.6.0 the submission is refused 401 in auth, upstream of the meter, and usage reads `requests: 0`. The argument this row needs is `lane-absent`\n'
+        return 0
+      fi ;;
     a2a:undecodable-body) printf 'malformed\n'; return 0 ;;
   esac
   case "$obligation" in
@@ -115,7 +175,11 @@ plane_scenario() {  # <plane> <cell-json> -> "<scenario>" | "-<TAB><why>"
   esac
   case "$outcome" in
     ok|unauthenticated|out_of_scope|over_budget|malformed) printf '%s\n' "$outcome" ;;
-    upstream_down) printf 'upstream_down\n' ;;   # mcp's is refused above: only a2a's mock has a control
+    upstream_down) printf 'upstream_down\n' ;;   # both planes: the control was PROBED above, per plane
+    # Reachable ONLY because the arm above returned when the probe said the rig cannot boot it: this
+    # is the configuration with a REGISTERED agent whose lane is absent, and `no_lane` is the name
+    # main() boots it under. No second probe, and no code path without a caller.
+    no-agents-configured) printf 'no_lane\n' ;;
     *) printf -- '-\t%s has no mechanism for outcome %s\n' "$entry" "${outcome:-<none>}" ;;
   esac
 }
@@ -197,7 +261,13 @@ main() {
     limits:
       - { budget: 1000000, per: day }" ;;
   esac
-  h2_boot "${raw}/rig" "$groups" >"${raw}/rig-boot.log" 2>&1 \
+  # THE BOOT ARGUMENT IS THE SCENARIO'S, and only `no_lane` has one: it is the a2a configuration
+  # with a registered agent whose LANE IS ABSENT, which plane_scenario only names after ps_rig_can
+  # has read that argument out of this rig's own h2_boot. Every other scenario boots exactly as it
+  # always did, with no third argument at all.
+  local -a boot_args=("${raw}/rig" "$groups")
+  [ "$scenario" != no_lane ] || boot_args+=(lane-absent)
+  h2_boot "${boot_args[@]}" >"${raw}/rig-boot.log" 2>&1 \
     || ps_fail "the ${plane} rig's h2_boot failed: $(tail -c 400 "${raw}/rig-boot.log" | tr '\n' ' ')"
 
   # The principal. `out_of_scope` mints through the admin API with an EXPLICIT EMPTY allowed_pools —

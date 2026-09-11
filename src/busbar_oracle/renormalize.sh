@@ -115,7 +115,10 @@ for raw in "$d"/raw/*/; do
       failed=$((failed+1)); continue ;;
   esac
   readback="$(jq -c '.effects.readback // empty' "$cell" 2>/dev/null)"
-  python3 "${here}/normalize.py" "$raw/captured.json" ${kid:+--key-id "$kid"} \
+  # --cell IS PART OF THE CALL SITE, not a flag beside it: normalize.py's SCOPED rules fire off the
+  # cell id, so a renormalization that omitted it would write a cell the recorder never made — the
+  # same failure mode the driver table above exists to prevent, one argument further along.
+  python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" ${kid:+--key-id "$kid"} \
     ${keep_lines:+--keep-body-lines "$keep_lines"} ${keep_spec:+--keep "$keep_spec"} \
     ${driver_flag[0]+"${driver_flag[@]}"} >"$raw/renormalized.json" \
     || { echo "renormalize: normalize.py failed on $id" >&2; rm -f "$raw/renormalized.json"; failed=$((failed+1)); continue; }

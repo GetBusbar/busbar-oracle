@@ -544,7 +544,7 @@ record_plane_cell() {  # <id> <cell-json> <raw-dir> <safe> <plane>
   [ -s "$raw/captured.json" ] || { record "$id" FAIL "the ${plane} rig subject wrote no capture" \
     "$(tail -c 300 "$raw/plane.err" | tr '\n' ' ')"; return; }
   kid="$(cat "$raw/key-id" 2>/dev/null)"
-  python3 "${here}/normalize.py" "$raw/captured.json" ${kid:+--key-id "$kid"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
+  python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" ${kid:+--key-id "$kid"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
     || { rm -f "$OUT/cells/$safe.json"; record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return; }
   record "$id" PASS "${plane} rig scenario ${out}: HTTP $(cat "$raw/status" 2>/dev/null); usage Δ $(jq -c '.effects.usage' "$OUT/cells/$safe.json")" ""
   n=$((n + 1))
@@ -696,7 +696,7 @@ PY
   printf '%s\n' "$rc" >"$raw/status"
   python3 "${here}/capture-exec.py" "$rc" "$raw/stdout" "$raw/stderr" --strip-path "$WORK" --strip-path "$xwork" --strip-path "$repo" --strip-path "$BIN" >"$raw/captured.json" 2>"$raw/capture.err" \
     || { record "$id" FAIL "capture-exec.py failed" "$(tail -c 300 "$raw/capture.err")"; return; }
-  python3 "${here}/normalize.py" "$raw/captured.json" ${xkeep_lines:+--keep-body-lines "$xkeep_lines"} ${xkeep_spec:+--keep "$xkeep_spec"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
+  python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" ${xkeep_lines:+--keep-body-lines "$xkeep_lines"} ${xkeep_spec:+--keep "$xkeep_spec"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
     || { record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return; }
   record "$id" PASS "exit ${rc}; $(head -c 60 "$raw/stdout" | tr '\n' ' ')" ""
   n=$((n + 1))
@@ -954,7 +954,7 @@ run_readback() {  # <request-json {path,headers,auth,listener}> <write-response-
   if ! cap="$(jq -n --argjson s "$rstatus" --rawfile b "$rbody" '{status: $s, headers: {}, body: $b, effects: {}}' 2>"$raw/readback.err")"; then
     rm -f "$rbody"; printf 'could not build the readback capture for %s: %s\n' "$pth" "$(tr '\n' ' ' <"$raw/readback.err" | tail -c 200)"; return 1
   fi
-  normd="$(printf '%s' "$cap" | python3 "${here}/normalize.py" --key-id "$kid" 2>"$raw/readback.err")"
+  normd="$(printf '%s' "$cap" | python3 "${here}/normalize.py" --cell "$id" --key-id "$kid" 2>"$raw/readback.err")"
   if [ -z "$normd" ]; then
     rm -f "$rbody"; printf 'normalize.py failed on the readback of %s: %s\n' "$pth" "$(tr '\n' ' ' <"$raw/readback.err" | tail -c 200)"; return 1
   fi
@@ -1096,7 +1096,7 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
   printf '%s\n' "$kid" >"$raw/key-id"   # so renormalize.sh can re-run this cell faithfully
   # --driver concurrent: this is the ONLY call site that passes it, and it turns on exactly one rule
   # (metrics.concurrent-attempts). See normalize.py; renormalize.sh's driver table mirrors this line.
-  if ! python3 "${here}/normalize.py" "$raw/captured.json" --key-id "$kid" --driver concurrent >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
+  if ! python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" --key-id "$kid" --driver concurrent >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
     record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return
   fi
   record "$id" PASS "N=${cn}; statuses ${statuses}" ""
@@ -1180,7 +1180,7 @@ record_ws_cell() {  # <id> <cell-json> <raw-dir> <safe>
   # OWN `ws.dialect`, which travels inside captured.json -- so renormalize.sh re-derives a ws cell
   # years later without a driver table that could have drifted, and a cell can never be
   # re-normalized under a dialect other than the one it was recorded in.
-  if ! python3 "${here}/normalize.py" "$raw/captured.json" --key-id "$kid" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
+  if ! python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" --key-id "$kid" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
     record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; return
   fi
   status="$(jq -r '.status' "$OUT/cells/$safe.json")"
@@ -1320,7 +1320,7 @@ while IFS=$'\x1f' read -r id outcome driver keep_lines keep_spec needs_fixture p
     else
       record "$id" FAIL "could not strip the harness paths out of ${sname}'s capture" "$(tail -c 300 "$raw/scrub.err")"; continue
     fi
-    python3 "${here}/normalize.py" "$raw/captured.json" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
+    python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" >"$OUT/cells/$safe.json" 2>"$raw/normalize.err" \
       || { record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; continue; }
     st="$(jq -r .status "$raw/captured.json")"
     # THE VERDICT IS script_cell_verdict()'s, defined once above the loop so the self-test drives
@@ -1494,7 +1494,7 @@ PY
   if ! python3 "${here}/capture.py" "$raw/headers" "$status" "$raw/body" "$raw/before" "$raw/after" "${egress_files[@]}" >"$raw/captured.json" 2>"$raw/capture.err"; then
     record "$id" FAIL "capture.py failed" "$(tail -c 300 "$raw/capture.err")"; continue
   fi
-  if ! python3 "${here}/normalize.py" "$raw/captured.json" --key-id "$kid" ${keep_lines:+--keep-body-lines "$keep_lines"} ${keep_spec:+--keep "$keep_spec"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
+  if ! python3 "${here}/normalize.py" "$raw/captured.json" --cell "$id" --key-id "$kid" ${keep_lines:+--keep-body-lines "$keep_lines"} ${keep_spec:+--keep "$keep_spec"} >"$OUT/cells/$safe.json" 2>"$raw/normalize.err"; then
     record "$id" FAIL "normalize.py failed" "$(tail -c 300 "$raw/normalize.err")"; continue
   fi
   # a mutating admin cell's `request.post`: read back the resource the write touched (AFTER the

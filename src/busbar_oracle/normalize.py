@@ -140,10 +140,75 @@ What is normalized (each rule is a named entry in `applied`):
                       header — that is the point: this is the one place in the normalizer that must
                       stay maximally strict
 
-Usage: normalize.py <captured.json> [--key-id <id>] [--keep-body-lines <regex>] [--keep <json>] > normalized.json
+── RULES THAT ARE NOT ON BY DEFAULT: SCOPED TO THE CELL IDS THAT NEED THEM ─────────────────────
+
+Every rule above applies to EVERY cell, which is right for a nondeterminism busbar emits everywhere
+(a Date header, a synthesized wire id). The three below are not like that: each takes out a figure
+that is a real per-run draw on ONE plane's answers and a real CONTRACT somewhere else in the same
+corpus. A blanket version of any of them would silently rewrite a cell it is not about, and a golden
+whose bytes were rewritten by a rule nobody scoped is the failure this whole file exists to prevent.
+
+So they fire only for a cell whose ID matches the rule's own regex (`SCOPED_RULES`), and the id is
+handed in with `--cell`. No cell id, no scoped rule: a caller that does not say which cell this is
+gets exactly the behaviour that existed before these rules did.
+
+THE SCOPE IS TOOL CODE, NOT DATA. It is a table in this file, not a field a corpus can set and not a
+file loaded out of the data directory. The oracle must be able to judge a workspace without sharing
+anything with it (pyproject.toml's own note on why the tool has no dependencies); a normalizer whose
+stripping a consumer could widen from its own tree is a judge the judged can instruct.
+
+  text.a2a-task-id           busbar ISSUES ITS OWN a2a task identity and substitutes it into every
+                             answer it relays — `format!("a2a-{}-{}", agent_id, uuid_like(body, now))`
+                             in crates/busbar-a2a/src/a2a/receive.rs, where `uuid_like` is a 16-hex
+                             rendering of a hash over the body, the clock, a process-wide counter and
+                             the pid. So it is new on every recording, and it is 16 hex characters:
+                             `ID_RULES`' own hex rule needs 32 and its `(req|resp|msg|task|…)_`
+                             prefix rule needs an underscore, so NOTHING took it. MEASURED against
+                             1.6.0 through the a2a rig: the `ok` answer carries it twice
+                             (`result.task.id` and `result.task.contextId`,
+                             `a2a-probe-546485ee16d77208`) and the `upstream_down` answer carries it
+                             once more (`data[].resourceName`, a different value each run).
+                             The AGENT NAME is KEPT and only the 16 hex digits are replaced
+                             (`a2a-probe-<TASKID>`): which agent a task was issued against is the
+                             plane's contract, and a cell that started issuing ids for a different
+                             agent must still be red.
+  json.a2a-task-timestamp    the a2a task's `timestamp` — an RFC 3339 instant of the moment the task
+                             moved (`busbar_substrate::civil::rfc3339_from_secs(task.updated_at)`),
+                             measured as `"2026-09-11T06:16:32.127Z"` at `result.task.status`.
+                             `TS_KEYS` already holds `timestamp`, but only for an INTEGER value, and
+                             THAT BOUND IS NOT AN OVERSIGHT TO FIX BY WIDENING IT. The corpus has a
+                             real ISO contract under one of those very keys:
+                             `ops.scrape|v1models|anthropic-fp` records
+                             `"created_at": "1970-01-01T00:00:00Z"` sixteen times, a FIXED LITERAL
+                             busbar emits for every model (crates/busbar-llm-codec/src/anthropic/mod.rs,
+                             and the route inventory states it as the contract). A rule that took ISO
+                             strings under `TS_KEYS` corpus-wide would replace all sixteen and destroy
+                             the one cell that proves busbar still emits the literal. Hence: this key,
+                             this shape, these cells.
+  text.retry-after-seconds   HOW LONG UNTIL THE WINDOW ROLLS, rendered INTO the refusal's own prose.
+                             MEASURED on `mcp` `over_budget` against 1.6.0: the message reads
+                             `… refused by your budget: Limit { group: "h2-oracle", metric:
+                             "requests", window: Some("day"), pool: None, downgrade_to: None,
+                             retry_after: Some(63690) }` — seconds remaining in the UTC day, so a
+                             different integer in every recording of the same cell. The same figure is
+                             rendered `Retry after {n}s` by the breaker-open refusals on both planes
+                             (crates/busbar-a2a/src/a2a/refusal_client.rs, relay.rs;
+                             crates/busbar-mcp/src/mcp/method.rs). The `Retry-After` HEADER carrying
+                             it is already blanked by `hdr.retry-after`, which is the same decision
+                             one layer up and the reason this one is named after it: the figure is a
+                             wall-clock draw, its PRESENCE is the contract. Only the digits are
+                             replaced, so a refusal that stopped naming a wait at all is still red.
+
+Usage: normalize.py <captured.json> [--key-id <id>] [--cell <cell-id>] [--keep-body-lines <regex>] [--keep <json>] > normalized.json
+  --cell '<cell-id>': the id of the cell being normalized. Decides which SCOPED rules above apply,
+    and nothing else. Omitted: no scoped rule fires.
   --keep '<json>': per-cell opt-in that OVERRIDES the default stripping named above for named parts
     of THIS cell only: {"headers": ["retry-after", ...], "json_keys": ["info.version", ...],
     "text_regex": "..."}. Absent (the default): behavior is unchanged from before this flag existed.
+    UNCHANGED BY THE SCOPED RULES: `json_keys` and `text_regex` short-circuit ahead of every rule,
+    scoped or not, so a cell that opted a path or a line out keeps it exactly as raw as it did
+    before. A kept HEADER is still id-normalized, as its own note has always said, and a task id is
+    a synthesized wire id.
 
 Anything NOT listed is preserved byte-for-byte. Body JSON is re-serialized canonically (sorted keys,
 no whitespace) so that key order — which is NOT semantically meaningful and which serializers may
@@ -187,6 +252,50 @@ USAGE_WINDOW_KEYS = {"start", "end"}
 # AWS Bedrock's own spelling on Converse's `metrics` member — S-3's "latencyMs is timing and
 # normalized" decision, extended to every cell that carries it, not only the same-dialect one)
 TIMING_KEYS = {"latency_ms", "latencyMs"}
+
+# ── THE SCOPED RULES (see the module docstring for why each is scoped and not blanket) ───────────
+#
+# busbar's OWN a2a task identity: `a2a-<agent-id>-<16 hex>`. The agent name is captured and put back,
+# so only the draw is replaced. Non-greedy on the agent segment, because an agent id may itself carry
+# hyphens and the 16 hex digits are the LAST segment, never the first one that happens to fit.
+A2A_TASK_ID = re.compile(r"\ba2a-([0-9A-Za-z][0-9A-Za-z._-]*?)-[0-9a-f]{16}\b")
+# An RFC 3339 instant, whole-value (never a substring of a longer string): this rule replaces the
+# VALUE of a named key, so a partial match would be a different rule with a different name.
+ISO_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$")
+# The a2a TASK's own moment. Deliberately NOT every key in TS_KEYS: `created_at`/`updated_at` are the
+# keys the corpus holds a fixed ISO literal under (ops.scrape|v1models|anthropic-fp), and on this
+# plane they are unix integers `ts.unix` already takes. One key, and it is the one that was measured.
+A2A_TASK_TS_KEYS = {"timestamp"}
+# The seconds-until-retry figure, in the two renderings busbar actually emits. Each replaces the
+# DIGITS ONLY: a refusal that stopped naming a wait, or named it in a third spelling, stays red.
+RETRY_SECONDS_RULES = [
+    (re.compile(r"\bretry_after: Some\(\d+\)"), "retry_after: Some(<RETRY_SECS>)"),
+    (re.compile(r"\bRetry after \d+s\b"), "Retry after <RETRY_SECS>s"),
+]
+# WHICH CELLS EACH SCOPED RULE APPLIES TO. A regex over the cell id, the same convention the
+# product's accepted-differences.json / accepted-gaps.json use for their own `cells` field.
+SCOPED_RULES = {
+    # Every a2a answer that carries a task carries busbar's issued identity for it — which answers
+    # those are is the PLANE's business, not a list this file would have to keep in step with it. The
+    # plane is the scope; the id shape (`a2a-…-<16 hex>`) is the second fence, and no other plane
+    # emits it.
+    "text.a2a-task-id": re.compile(r"^a2a\|"),
+    "json.a2a-task-timestamp": re.compile(r"^a2a\|"),
+    # Only the two outcomes that are ABOUT a wait: a budget window that has not rolled yet
+    # (`over_budget`) and a lane whose breaker is still open (`upstream_down`). Both planes render
+    # the figure; no other outcome on either of them has a wait to name.
+    "text.retry-after-seconds": re.compile(r"^(a2a|mcp)\|.*\|(over_budget|upstream_down)$"),
+}
+
+
+def scoped_rules(cell_id: str | None) -> frozenset:
+    """The scoped rules THIS cell is in scope for. No cell id -> none of them, which is exactly the
+    behaviour that existed before any of them did."""
+    if not cell_id:
+        return frozenset()
+    return frozenset(name for name, rx in SCOPED_RULES.items() if rx.search(cell_id))
+
+
 VERSION_RX = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$")
 POOL_LINE = re.compile(r"^\s+pool /\S+ = ")
 ERROR_BULLET = re.compile(r"^  - ")
@@ -200,7 +309,8 @@ PAIR = re.compile(r"\((\d+) vs (\d+)")
 EXPO_TIMING = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*(_seconds_sum|_seconds|_bucket)(\{|\s)|quantile=")
 
 
-def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers_min: dict | None = None) -> dict:
+def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers_min: dict | None = None,
+                 scoped: frozenset = frozenset()) -> dict:
     keep_headers = keep_headers or set()
     headers_min = headers_min or {}
     out = {}
@@ -218,7 +328,7 @@ def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers
         if lk in keep_headers:
             # this cell opted in: the value IS the contract -- keep it (still id-normalized, so a
             # wire id inside it does not become a spurious per-run diff), never stripped/blanked.
-            applied.add("keep.header"); out[lk] = norm_scalar_str(v, applied); continue
+            applied.add("keep.header"); out[lk] = norm_scalar_str(v, applied, scoped); continue
         if lk in HDR_STRIP:
             applied.add("hdr.date"); continue
         if lk in HDR_TIMING:
@@ -228,7 +338,7 @@ def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers
         if lk in HDR_ETAG:
             applied.add("hdr.etag"); out[lk] = "<ETAG>"; continue
         # header VALUES carry synthesized ids too (request-id: req_01<base62>): same id rules as bodies
-        out[lk] = norm_scalar_str(v, applied)
+        out[lk] = norm_scalar_str(v, applied, scoped)
     return dict(sorted(out.items()))
 
 
@@ -250,7 +360,7 @@ def norm_headers(h: dict, applied: set, keep_headers: set | None = None, headers
 LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:\d{2,5}\b")
 
 
-def norm_scalar_str(s: str, applied: set) -> str:
+def norm_scalar_str(s: str, applied: set, scoped: frozenset = frozenset()) -> str:
     for rx, rep in ID_RULES:
         if rx.search(s):
             applied.add("id.wire" if "<ID>" in rep else "audit.hash")
@@ -258,6 +368,15 @@ def norm_scalar_str(s: str, applied: set) -> str:
     if LOOPBACK_PORT.search(s):
         applied.add("text.port")
         s = LOOPBACK_PORT.sub("127.0.0.1:<PORT>", s)
+    # ── SCOPED: only for a cell whose id the rule's regex names (SCOPED_RULES) ───────────────────
+    if "text.a2a-task-id" in scoped and A2A_TASK_ID.search(s):
+        applied.add("text.a2a-task-id")
+        s = A2A_TASK_ID.sub(r"a2a-\1-<TASKID>", s)
+    if "text.retry-after-seconds" in scoped:
+        for rx, rep in RETRY_SECONDS_RULES:
+            if rx.search(s):
+                applied.add("text.retry-after-seconds")
+                s = rx.sub(rep, s)
     return s
 
 
@@ -270,7 +389,8 @@ METRIC_COOLDOWN = re.compile(r"cooldown")
 ID_KEYS = {"responseId", "request_id", "requestId"}
 
 
-def norm_json(v, applied: set, key_id: str | None, parent_key: str = "", path: str = "", keep_json_keys: set | None = None):
+def norm_json(v, applied: set, key_id: str | None, parent_key: str = "", path: str = "", keep_json_keys: set | None = None,
+              scoped: frozenset = frozenset()):
     keep_json_keys = keep_json_keys or set()
     if isinstance(v, dict):
         out = {}
@@ -286,6 +406,12 @@ def norm_json(v, applied: set, key_id: str | None, parent_key: str = "", path: s
                 applied.add("ts.usage-window"); out[k] = 0; continue
             if k in TS_KEYS and isinstance(x, (int, float)):
                 applied.add("ts.unix"); out[k] = 0; continue
+            # ── SCOPED: the a2a TASK's own RFC 3339 moment. Below `ts.unix` on purpose — an integer
+            # under the same key is that rule's, and this one never renames it — and above the
+            # generic string walk, because the value is replaced whole rather than scrubbed.
+            if ("json.a2a-task-timestamp" in scoped and k in A2A_TASK_TS_KEYS
+                    and isinstance(x, str) and ISO_INSTANT.match(x)):
+                applied.add("json.a2a-task-timestamp"); out[k] = "<TS>"; continue
             if k == "uptime_seconds" and isinstance(x, (int, float)) and not isinstance(x, bool):
                 # HOW LONG THE PROCESS HAS BEEN UP IS A MEASUREMENT, NOT A CONTRACT. `GET
                 # /api/v1/admin/info` reports it, and nothing normalized it: a recording that reached
@@ -313,27 +439,27 @@ def norm_json(v, applied: set, key_id: str | None, parent_key: str = "", path: s
                 nk = k
                 if key_id and key_id in nk:
                     applied.add("key.id"); nk = nk.replace(key_id, "<KEY>")
-                nk = norm_scalar_str(nk, applied)
+                nk = norm_scalar_str(nk, applied, scoped)
                 applied.add("metrics.cooldown")
-                out[nk] = "<JITTER>" if isinstance(x, (int, float)) else norm_json(x, applied, key_id, k, child_path, keep_json_keys)
+                out[nk] = "<JITTER>" if isinstance(x, (int, float)) else norm_json(x, applied, key_id, k, child_path, keep_json_keys, scoped)
                 continue
             if parent_key == "metrics":
                 # metric LABELS carry the minted key id (bucket="vk_…") and other per-run ids
                 nk = k
                 if key_id and key_id in nk:
                     applied.add("key.id"); nk = nk.replace(key_id, "<KEY>")
-                nk = norm_scalar_str(nk, applied)
-                out[nk] = norm_json(x, applied, key_id, k, child_path, keep_json_keys); continue
+                nk = norm_scalar_str(nk, applied, scoped)
+                out[nk] = norm_json(x, applied, key_id, k, child_path, keep_json_keys, scoped); continue
             if k in ID_KEYS and isinstance(x, str):
                 applied.add("id.wire"); out[k] = "<ID>"; continue
-            out[k] = norm_json(x, applied, key_id, k, child_path, keep_json_keys)
+            out[k] = norm_json(x, applied, key_id, k, child_path, keep_json_keys, scoped)
         return dict(sorted(out.items()))
     if isinstance(v, list):
-        return [norm_json(x, applied, key_id, parent_key, path, keep_json_keys) for x in v]
+        return [norm_json(x, applied, key_id, parent_key, path, keep_json_keys, scoped) for x in v]
     if isinstance(v, str):
         if key_id and v == key_id:
             applied.add("key.id"); return "<KEY>"
-        return norm_scalar_str(v, applied)
+        return norm_scalar_str(v, applied, scoped)
     return v
 
 
@@ -631,7 +757,8 @@ def es_event_type(hdrs: dict) -> str:
     return "<no-event-type>"
 
 
-def norm_frame_payload(payload: bytes, applied: set, key_id: str | None, keep_json_keys: set | None):
+def norm_frame_payload(payload: bytes, applied: set, key_id: str | None, keep_json_keys: set | None,
+                       scoped: frozenset = frozenset()):
     """One frame's payload through the ORDINARY body rules: JSON is parsed and run through norm_json
     (so metrics.timing fires on `latencyMs`, ts.unix on `created`, id.wire on a synthesized id — the
     same rules an unframed body gets), anything else through the scalar id rules."""
@@ -639,13 +766,14 @@ def norm_frame_payload(payload: bytes, applied: set, key_id: str | None, keep_js
     stripped = text.strip()
     if stripped.startswith("{") or stripped.startswith("["):
         try:
-            return norm_json(json.loads(stripped), applied, key_id, keep_json_keys=keep_json_keys)
+            return norm_json(json.loads(stripped), applied, key_id, keep_json_keys=keep_json_keys, scoped=scoped)
         except Exception:
             pass
-    return norm_scalar_str(text if key_id is None else text.replace(key_id, "<KEY>"), applied)
+    return norm_scalar_str(text if key_id is None else text.replace(key_id, "<KEY>"), applied, scoped)
 
 
-def norm_body(body: str, applied: set, key_id: str | None, keep_json_keys: set | None = None, keep_regex=None, content_type: str | None = None):
+def norm_body(body: str, applied: set, key_id: str | None, keep_json_keys: set | None = None, keep_regex=None, content_type: str | None = None,
+              scoped: frozenset = frozenset()):
     raw_bytes = base64.b64decode(body[7:]) if body.startswith("base64:") else body.encode("utf-8", "replace")
     raw = raw_bytes.decode("utf-8", "replace")
     if content_type and EVENTSTREAM_CT in content_type.lower():
@@ -658,11 +786,11 @@ def norm_body(body: str, applied: set, key_id: str | None, keep_json_keys: set |
             applied.add("eventstream.undecodable")
         else:
             applied.add("eventstream.frames")
-            return {"eventstream": [[es_event_type(h), norm_frame_payload(p, applied, key_id, keep_json_keys)] for h, p in frames]}
+            return {"eventstream": [[es_event_type(h), norm_frame_payload(p, applied, key_id, keep_json_keys, scoped)] for h, p in frames]}
     stripped = raw.strip()
     if stripped.startswith("{") or stripped.startswith("["):
         try:
-            return {"json": norm_json(json.loads(stripped), applied, key_id, keep_json_keys=keep_json_keys)}
+            return {"json": norm_json(json.loads(stripped), applied, key_id, keep_json_keys=keep_json_keys, scoped=scoped)}
         except Exception:
             pass
     # SSE / text: normalize line-wise; for `data: {json}` lines canonicalize the JSON payload too.
@@ -670,11 +798,11 @@ def norm_body(body: str, applied: set, key_id: str | None, keep_json_keys: set |
     for ln in raw.split("\n"):
         if ln.startswith("data: ") and ln[6:].lstrip().startswith("{"):
             try:
-                j = norm_json(json.loads(ln[6:]), applied, key_id, keep_json_keys=keep_json_keys)
+                j = norm_json(json.loads(ln[6:]), applied, key_id, keep_json_keys=keep_json_keys, scoped=scoped)
                 lines.append("data: " + json.dumps(j, separators=(",", ":"), sort_keys=True)); continue
             except Exception:
                 pass
-        lines.append(norm_scalar_str(ln, applied) if key_id is None else norm_scalar_str(ln.replace(key_id, "<KEY>"), applied))
+        lines.append(norm_scalar_str(ln, applied, scoped) if key_id is None else norm_scalar_str(ln.replace(key_id, "<KEY>"), applied, scoped))
     return {"text": norm_text("\n".join(lines), applied, keep_regex)}
 
 
@@ -905,8 +1033,10 @@ def norm_ws(ws: dict, applied: set, key_id: str | None) -> dict:
 
 
 def normalize(cap: dict, key_id: str | None, keep_lines: str | None = None, keep: dict | None = None,
-              driver: str | None = None) -> dict:
+              driver: str | None = None, cell_id: str | None = None) -> dict:
     keep = keep or {}
+    # WHICH SCOPED RULES THIS CELL IS IN SCOPE FOR, decided ONCE, off the cell id and nothing else.
+    scoped = scoped_rules(cell_id)
     keep_headers = {h.lower() for h in keep.get("headers", [])}
     headers_min = {h.lower(): n for h, n in (keep.get("headers_min") or {}).items()}
     keep_json_keys = set(keep.get("json_keys", []))
@@ -916,7 +1046,7 @@ def normalize(cap: dict, key_id: str | None, keep_lines: str | None = None, keep
     # The Content-Type decides whether the body is TEXT at all: an eventstream body is binary framing
     # and must be decoded, not read through `.decode(..., "replace")` (see `eventstream.frames`).
     content_type = next((v for k, v in cap.get("headers", {}).items() if k.lower() == "content-type"), None)
-    body = norm_body(cap.get("body", ""), body_rules, key_id, keep_json_keys, keep_regex, content_type)
+    body = norm_body(cap.get("body", ""), body_rules, key_id, keep_json_keys, keep_regex, content_type, scoped)
     if keep_lines is not None:
         # The cell's contract is what is NOT there: keep only the matching lines (a JSON body is
         # rendered canonically first so the filter sees one line per top-level entry).
@@ -925,14 +1055,17 @@ def normalize(cap: dict, key_id: str | None, keep_lines: str | None = None, keep
         body = {"text": "\n".join(ln for ln in text.split("\n") if rx.search(ln))}
         body_rules.add("body.keep-lines")
     applied |= body_rules
-    headers = norm_headers(cap.get("headers", {}), applied, keep_headers, headers_min)
+    headers = norm_headers(cap.get("headers", {}), applied, keep_headers, headers_min, scoped)
     if body_rules and "content-length" in headers:
         applied.add("hdr.length"); headers["content-length"] = "<LEN>"
     # `egress` is pulled out before the generic pass: norm_json's id/ts scrubbing rules must never
     # touch it (see the egress.* rule docs above) — it gets only its own, much stricter, treatment.
     effects_in = dict(cap.get("effects", {}))
     egress_in = effects_in.pop("egress", None)
-    effects = norm_json(effects_in, applied, key_id)
+    # `effects` gets the scoped rules too: the audit chain and the usage rows carry the same
+    # issued task id the body does. `egress` was pulled out above and gets NONE of them, scoped or
+    # otherwise — that is the rule egress.body already states and this changes nothing about it.
+    effects = norm_json(effects_in, applied, key_id, scoped=scoped)
     if egress_in is not None:
         effects["egress"] = norm_egress(egress_in, applied)
     if driver == "concurrent" and "metrics" in effects:
@@ -970,8 +1103,11 @@ def main() -> int:
     driver = None
     if "--driver" in args:
         i = args.index("--driver"); driver = args[i + 1]; del args[i:i + 2]
+    cell_id = None
+    if "--cell" in args:
+        i = args.index("--cell"); cell_id = args[i + 1]; del args[i:i + 2]
     cap = json.load(open(args[0])) if args else json.load(sys.stdin)
-    print(json.dumps(normalize(cap, key_id, keep_lines, keep, driver), separators=(",", ":"), sort_keys=True))
+    print(json.dumps(normalize(cap, key_id, keep_lines, keep, driver, cell_id), separators=(",", ":"), sort_keys=True))
     return 0
 
 

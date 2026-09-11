@@ -4,6 +4,84 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.16
+
+Two shapes of the same defect: a recorder that had MEMORISED a fact about the product
+instead of reading it, and a normalizer with no way to take out a figure that is a draw on
+one plane and a contract on another — so it took out neither.
+
+- **What a rig can drive is ASKED OF THE RIG, every time.** `plane_scenario()` carried two
+  hard-coded answers about the product tree. Both were measured and correct when they were
+  written, and both had since stopped being true:
+
+  *`mcp:upstream_down`* said "h2-mock-upstream.mjs honours no fault control". The mcp rig has since
+  grown exactly the control its a2a sibling always had — `H2_CONTROL_FILE` set by `h2_boot`, handed
+  to the mock, and `h2-upstream-outage.sh` beside it to arm it — and the row went on being a named
+  gap anyway, because the tool was reciting a measurement rather than taking one. Measured: v0.3.15's
+  `plane_scenario()`, pointed at the tree where the control exists, still answers
+  "honours no fault control".
+
+  *`a2a:no-agents-configured`* said "h2_boot always registers and approves the `probe` agent". It no
+  longer does — and the configuration its new argument reaches TURNED OUT NOT TO BE THE CELL'S. With
+  no `agents:` key the plane mounts no routes at all, so the submission is refused `401` in AUTH,
+  upstream of the meter, and the key's usage reads `requests: 0` — while the cell's own `why` states
+  `{"requests": 1}`, a caller who drew a slot and bought nothing. Two configurations were wearing one
+  name. The row is now the SHARPER one it was always about: a REGISTERED agent whose LANE IS ABSENT,
+  fronted, admitted, metered, resolving to nothing. The gap names the argument that would close it,
+  `lane-absent`, and `ps_rig_can` reads `h2_boot`'s own argument guard for it.
+
+  `ps_rig_can(plane, capability)` is the only place either question is answered, and it answers by
+  reading the tree the tool is POINTED AT. A gap is printed only when it says the rig cannot; when it
+  says the rig can, the ordinary gates decide — so a cell that is ALSO blocked by something more
+  fundamental (an `issue` obligation, a transport with no client) goes on being refused for that
+  reason and not for a capability the rig no longer lacks. The `upstream-fault` probe takes all three
+  of `H2_CONTROL_FILE` set at boot, handed to the mock it starts, and a SCENARIO beside the library
+  that arms it: "a capability with no caller is a claim" is the product's own sentence for why its
+  control shipped together with the scenario, and the probe holds the rig to it. The library is never
+  counted as its own caller.
+
+  **This changes what is recorded.** `mcp|…|tools/call|upstream_down` is drivable where it was a gap:
+  12 plane cells instead of 11. Measured against 1.6.0 through the product's own rig, that cell
+  records `HTTP 200` with `isError: true` and "MCP upstream answered JSON-RPC error -32603: h2
+  fixture upstream: down" — the outage, not a healthy 200 wearing its name.
+
+- **Three normalisation rules, each SCOPED to the cells that need it.** Every other rule in
+  `normalize.py` applies to every cell, which is right for a nondeterminism busbar emits everywhere.
+  These three take out a figure that is a per-run draw on one plane's answers and a real CONTRACT
+  somewhere else in the same corpus, so each fires only for a cell whose id matches the rule's own
+  regex. The id arrives on `--cell`, which every one of `record.sh`'s call sites and `renormalize.sh`
+  now passes; **no cell id, no scoped rule**, so a caller that does not say which cell this is gets
+  exactly the behaviour that existed before these rules did.
+
+  * `text.a2a-task-id` — busbar ISSUES ITS OWN a2a task identity, `a2a-<agent>-<16 hex>`
+    (`receive.rs`, over a hash of the body, the clock, a process counter and the pid). Sixteen hex
+    digits: `ID_RULES`' hex rule needs 32 and its prefix rule needs an underscore, so NOTHING took it.
+    Measured through the rig: the `ok` answer carries it twice (`task.id`, `task.contextId`), the
+    `upstream_down` refusal a third time (`data[].resourceName`), all different on every run. The
+    AGENT NAME is kept; only the digits go.
+  * `json.a2a-task-timestamp` — the task's RFC 3339 moment (`"2026-09-11T06:16:32.127Z"` at
+    `task.status.timestamp`). `TS_KEYS` already holds `timestamp` but only for an INTEGER, and
+    **that bound is not an oversight to fix by widening it**: `ops.scrape|v1models|anthropic-fp`
+    records `"created_at": "1970-01-01T00:00:00Z"` sixteen times, a fixed literal busbar emits for
+    every model and the one cell that proves it still does. A corpus-wide ISO rule under `TS_KEYS`
+    would replace all sixteen. This key, this shape, these cells.
+  * `text.retry-after-seconds` — how long until the window rolls, rendered INTO the refusal's own
+    prose. Measured on mcp `over_budget`: `… refused by your budget: Limit { … retry_after:
+    Some(63690) }`, the seconds left in the UTC day. The same figure is rendered `Retry after {n}s`
+    by the breaker-open refusals on both planes. The `Retry-After` HEADER carrying it has been
+    blanked by `hdr.retry-after` since that rule was written; this is the same decision one layer
+    down, and only the digits are replaced, so a refusal that stopped naming a wait is still red.
+
+  **NO COMMITTED BYTE CAN MOVE, and it is proven rather than argued**: not one of the ids in the
+  committed golden's ledger is in scope for any of the three, because no a2a or mcp cell has ever
+  been recorded. The scopes are TOOL CODE — a table in `normalize.py`, not a field a corpus can set
+  and not a file loaded out of the data directory; the self-test reads that off the code. The
+  `--keep` un-strip hook is unchanged: `json_keys` and `text_regex` short-circuit ahead of every
+  rule, scoped or not.
+
+  Scope, over the product's 2,332 cells: `text.a2a-task-id` 470, `json.a2a-task-timestamp` 470,
+  `text.retry-after-seconds` 460.
+
 ## 0.3.15
 
 Three defects measured against the product's pinned harness, all of the same kind: a
