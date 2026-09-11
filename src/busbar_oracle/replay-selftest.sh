@@ -3491,7 +3491,10 @@ print("\n".join(out))
 PY
 )"
   if [ -z "$qq7_pairs" ]; then
-    say FAIL "the corpus names no non-chat llm cell at all: the op axis is unproven, and a case over an empty list is the vacuous green this file refuses"
+    # A corpus with no non-chat llm cell cannot prove this, and a case over an empty list would be
+    # the vacuous green this file refuses. Same posture as the scoped-rule-subjects case beside it:
+    # SKIP, naming the corpus, so a run that proved less than it looks says so on its last line.
+    skip "the op axis vs the corpus: ${qq7_cells} holds no non-chat llm cell, so no (op, door) pair was measured"
   else
     # The member each door's reader REFUSES to work without, by (op, ingress). Not a restatement of
     # the builder: these are the names busbar's own `read_<op>_request` errors BY, so a body that

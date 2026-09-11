@@ -1582,7 +1582,7 @@ def selftest() -> int:
         # EVERY ANSWER IN THIS FILE IS A PURE FUNCTION OF THE REQUEST. The oracle records a cell only
         # when two runs agree byte for byte, so a mock that drew anything per call would make every
         # new cell unrecordable — and would do it silently, as a flake.
-        for path, body, member in _LEAF:
+        for path, body, _member in _LEAF:
             a = post(path, body)[2]
             b = post(path, body)[2]
             say(a == b, f"{path} answers the SAME bytes twice")
