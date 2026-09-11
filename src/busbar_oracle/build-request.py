@@ -10,7 +10,11 @@ EGRESS dialect. ingress != egress is a cross-protocol cell.
 
 Reads a cell (JSON on stdin or --cell '<json>') and prints:
   {"method": "POST", "path": "...", "headers": {...}, "body": "<str>", "auth": "bearer"|"sigv4",
-   "note": "..."}
+   "stream": true|false, "note": "..."}
+
+`stream` is the CELL's declaration of its own request shape (see declares_stream), never a guess made
+from the outcome's name, and it is emitted so no consumer has to re-derive it from the body — which
+for gemini and bedrock is not in the body at all but in the path.
 The recorder adds the Authorization header for the cell's outcome (or omits it for
 `unauthenticated`) and, for `upstream_down`, the X-Oracle-Upstream: down control the mock honors is
 NOT sent by the client — the recorder flips the mock instead (busbar must not see a control header).
@@ -39,13 +43,53 @@ def canon(d: str) -> str:
     return DIALECT_ALIAS.get(d, d)
 
 
+# The two outcomes whose NAME is the only declaration they carry. They are the LAST thing
+# declares_stream() consults, not the first — see its docstring.
+STREAM_BY_NAME = ("ok_stream", "ok_stream_array")
+# Mock controls a BUFFERED request can never reach, so a cell that asks for one has declared that its
+# request is a stream. `stream-error` is gated in mock-upstream.py on `want_stream and stream_error`;
+# on the gemini/bedrock doors the same verb is reached only down the streaming arm.
+STREAM_ONLY_CONTROLS = ("stream-error",)
+
+
+def declares_stream(cell: dict) -> bool:
+    """Is THIS CELL's request a streamed one? Read off the CELL, never off the outcome's name alone.
+
+    This used to be `oc in ("ok_stream", "ok_stream_array")` and nothing else, and that is a defect
+    with a measurement behind it. The six `llm|<d>|<d>|request|stream_upstream_error` cells declare
+    `mock_control: {"stream-error": true}`; the mock gates that fault on `want_stream and
+    stream_error`, so a BUFFERED request can never reach it. All six were therefore sent buffered and
+    recorded the HAPPY PATH under the name of the failure — measured against 1.5.5 with their
+    `needs_fixture` lifted: `usage delta {"requests":1,"spend_cents":250,"tokens":18}` and a buffered
+    completion body, identically on both binaries. A cell that records the opposite of what it is
+    named is worse than an unrecorded one, because it is green.
+
+    THE ORDER, most specific first:
+      1. `stream` — the cell's own explicit field. A corpus that spells the request shape out is
+         believed, in BOTH directions, and never has to argue with a list of names living in the tool.
+      2. a `mock_control` only a stream can reach (STREAM_ONLY_CONTROLS). Asking the upstream to fail
+         PART WAY THROUGH a stream is a statement about the request, not just about the mock.
+      3. the outcome NAME, for the two outcomes that carry no other declaration. Last, because a name
+         is a convention and a declaration is a shape — and because it was being FIRST that made the
+         six cells above unrecordable.
+    """
+    if "stream" in cell:
+        return bool(cell["stream"])
+    control = cell.get("mock_control") or {}
+    if any(control.get(k) for k in STREAM_ONLY_CONTROLS):
+        return True
+    return cell.get("outcome") in STREAM_BY_NAME
+
+
 def request_for(cell: dict) -> dict:
     ing = canon(cell["ingress_dialect"])
     model = f"m-{canon(cell['egress_dialect'])}"
     oc = cell["outcome"]
-    # `ok_stream_array` is gemini's JSON-array streaming (no `alt=sse`); every other dialect streams
-    # one way only, so the array outcome is emitted for gemini ingress alone.
-    stream = oc in ("ok_stream", "ok_stream_array")
+    # WHETHER it streams is the cell's own declaration (declares_stream); HOW gemini frames a stream
+    # is the outcome that names the framing — `ok_stream_array` is gemini's JSON-array streaming (no
+    # `alt=sse`), every other dialect streams one way only, and a gemini cell that declares a stream
+    # without naming a framing gets SSE like everyone else.
+    stream = declares_stream(cell)
     hdr = {"Content-Type": "application/json"}
     auth = "bearer"
     note = ""
@@ -118,7 +162,12 @@ def request_for(cell: dict) -> dict:
         hdr.update(sigv4_headers("POST", path, raw.encode(), host, akid, secret))
         auth = "sigv4-signed"
 
-    return {"method": "POST", "path": path, "headers": hdr, "body": raw, "auth": auth, "note": note}
+    # `stream` IS PART OF THE EMITTED SHAPE, not just a local. The recorder and the product's
+    # llm-conformance validator both read this request back; a consumer that had to re-parse the body
+    # (and know that gemini and bedrock say it in the PATH instead) would be a second, quieter copy of
+    # the rule above, free to disagree with it.
+    return {"method": "POST", "path": path, "headers": hdr, "body": raw, "auth": auth,
+            "stream": stream, "note": note}
 
 
 # ── inbound SigV4 (the Bedrock SDK's model): the verifier reads region/service from the Credential

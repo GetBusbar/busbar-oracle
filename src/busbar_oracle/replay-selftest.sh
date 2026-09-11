@@ -3304,6 +3304,155 @@ grep -q "grep -v '_seconds'" <<<"$pp_src" && pp_bad="${pp_bad} the settle loop s
   || say FAIL "record.sh's settle loop:${pp_bad}"
 fi
 
+# (qq) A REQUEST IS STREAMED BECAUSE THE CELL SAYS SO, NOT BECAUSE OF THE OUTCOME'S NAME.
+#
+# build-request.py decided streaming with `oc in ("ok_stream", "ok_stream_array")` — a list of two
+# outcome NAMES. The six `llm|<d>|<d>|request|stream_upstream_error` cells declare
+# `mock_control: {"stream-error": true}`, and the mock gates that fault on `want_stream and
+# stream_error` (mock-upstream.py): a BUFFERED request can never reach it. So every one of those six
+# was sent buffered, the fault never fired, and what came back was the HAPPY PATH — measured against
+# 1.5.5 with their `needs_fixture` lifted: `usage Δ {"requests":1,"spend_cents":250,"tokens":18}` and
+# a buffered completion body, on both binaries, under the name of the failure. A cell that records
+# the opposite of what it is named is worse than an unrecorded one, because it is green.
+#
+# THE RULE IS THE CELL'S OWN DECLARATION, in the order build-request.py's declares_stream() states:
+# an explicit `stream` field first, then a `mock_control` only a stream can reach, and the two
+# outcome names LAST — last because a name is a convention and a declaration is a shape, and because
+# it was being first that made the six cells unrecordable.
+qq_build() {  # <cell-json> -> the request build-request.py emits
+  ORACLE_AWS_AKID=AKIAORACLESELFTEST00 ORACLE_AWS_SECRET=selftest-not-a-secret \
+  ORACLE_HOST=127.0.0.1:1 python3 "${here}/build-request.py" --cell "$1" 2>/dev/null
+}
+qq_wire() {  # <cell-json> -> yes|no|build-failed : is the request on the WIRE a streamed one?
+  local req; req="$(qq_build "$1")"
+  [ -n "$req" ] || { echo build-failed; return; }
+  python3 - "$req" <<'EOF'
+import json, sys
+r = json.loads(sys.argv[1])
+streamed = "streamGenerateContent" in r["path"] or "converse-stream" in r["path"]
+try:
+    streamed = streamed or json.loads(r["body"]).get("stream") is True
+except Exception:
+    pass
+print("yes" if streamed else "no")
+EOF
+}
+qq_declared() {  # <cell-json> -> what the emitted request SAYS about its own shape
+  local req; req="$(qq_build "$1")"
+  [ -n "$req" ] || { echo build-failed; return; }
+  python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("stream"))' "$req"
+}
+qq_case() {  # <want yes|no> <cell-json> <label>
+  local want="$1" cell="$2" label="$3" got decl
+  got="$(qq_wire "$cell")"
+  [ "$got" = "$want" ] && say PASS "build-request: $label -> streamed=$want" \
+                       || say FAIL "build-request: $label -> streamed=$got, want $want"
+  # …and what it SAYS about itself must agree with what it PUT ON THE WIRE: the recorder and the
+  # product's llm-conformance validator both read this request, and a `stream` field that disagreed
+  # with the body would be a second, quieter version of the same defect.
+  decl="$(qq_declared "$cell")"
+  case "$want:$decl" in
+    yes:True|no:False) ;;
+    *) say FAIL "build-request: $label declares stream=$decl but put streamed=$got on the wire" ;;
+  esac
+}
+
+# (qq1) the six real corpus rows, exactly as testing/shadow-oracle/cells.json declares them today:
+# no `stream` field anywhere, the whole declaration is the mock control.
+for d in anthropic openai responses gemini bedrock cohere; do
+  qq_case yes "{\"ingress_dialect\":\"$d\",\"egress_dialect\":\"$d\",\"outcome\":\"stream_upstream_error\",\"mock_control\":{\"stream-error\":true}}" \
+    "llm|$d|$d|request|stream_upstream_error (declares mock_control.stream-error)"
+done
+
+# (qq2) the outcomes whose NAME is their declaration still stream, and the ordinary ones still do not
+qq_case yes '{"ingress_dialect":"anthropic","egress_dialect":"anthropic","outcome":"ok_stream"}' \
+  "ok_stream, which declares nothing but its name"
+qq_case yes '{"ingress_dialect":"gemini","egress_dialect":"gemini","outcome":"ok_stream_array"}' \
+  "ok_stream_array, gemini's JSON-array framing"
+qq_case no '{"ingress_dialect":"anthropic","egress_dialect":"anthropic","outcome":"ok"}' \
+  "a plain ok cell is buffered"
+qq_case no '{"ingress_dialect":"openai","egress_dialect":"openai","outcome":"upstream_down"}' \
+  "an upstream_down cell is buffered"
+
+# (qq3) an EXPLICIT declaration outranks the name, in both directions — so a corpus that grows a
+# `stream` field never has to argue with a list of outcome names in the tool.
+qq_case yes '{"ingress_dialect":"cohere","egress_dialect":"cohere","outcome":"ok","stream":true}' \
+  "an ok cell that declares stream:true"
+qq_case no '{"ingress_dialect":"cohere","egress_dialect":"cohere","outcome":"ok_stream","stream":false}' \
+  "an ok_stream cell that declares stream:false (the declaration wins over the name)"
+
+# (qq4) …and the gemini array framing follows the OUTCOME, which is what names it — a gemini cell
+# that declares a stream and no framing gets SSE, the framing every other dialect streams with.
+qq_g_sse="$(qq_build '{"ingress_dialect":"gemini","egress_dialect":"gemini","outcome":"ok","stream":true}')"
+qq_g_arr="$(qq_build '{"ingress_dialect":"gemini","egress_dialect":"gemini","outcome":"ok_stream_array"}')"
+if grep -q 'alt=sse' <<<"$qq_g_sse" && ! grep -q 'alt=sse' <<<"$qq_g_arr"; then
+  say PASS "build-request: gemini's ARRAY framing is the outcome that names it; a plain declared stream is alt=sse"
+else
+  say FAIL "build-request: gemini framing — declared-stream path '$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["path"])' "$qq_g_sse" 2>/dev/null)' array path '$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["path"])' "$qq_g_arr" 2>/dev/null)'"
+fi
+
+# (qq5) the rule must be ONE function, asked for by name — a second `oc ==`/outcome test deciding
+# streaming anywhere in the builder is the defect growing back somewhere else.
+qq_src="$(cat "${here}/build-request.py")"
+qq_bad=""
+grep -q 'def declares_stream' <<<"$qq_src" || qq_bad="${qq_bad} there is no declares_stream() to drive;"
+grep -q 'stream = declares_stream(cell)' <<<"$qq_src" || qq_bad="${qq_bad} request_for() does not get its answer from declares_stream();"
+qq_rf="$(sed -n '/^def request_for/,/^def /p' <<<"$qq_src")"
+grep -q 'oc in ("ok_stream"' <<<"$qq_rf" \
+  && qq_bad="${qq_bad} an outcome-name list still decides streaming inside request_for();"
+[ -z "$qq_bad" ] \
+  && say PASS "build-request decides streaming in one place, off the cell's declaration" \
+  || say FAIL "build-request.py's streaming decision:${qq_bad}"
+
+# (qq6) …AND THE FAULT ACTUALLY FIRES. Everything above is about the shape of the request; this is
+# the only case that proves the shape REACHES the thing it exists to reach. The pinned mock gates the
+# mid-stream failure on `want_stream and stream_error` (mock-upstream.py's do_POST), so a buffered
+# request walks straight past it into the happy path — which is exactly what the six cells recorded.
+# Here the real mock is booted, its control file is set to the control those six cells declare, and
+# each dialect's request AS BUILT BY build-request.py is sent at it. The answer must carry the mock's
+# own mid-stream error text and must NOT be the healthy buffered body.
+qq6_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+qq6_dir="$W/qq6"; mkdir -p "$qq6_dir/egress"
+qq6_ctl="$qq6_dir/control"
+ORACLE_MOCK_CAPTURE_DIR="$qq6_dir/egress" python3 "${here}/mock-upstream.py" "$qq6_port" oracle-marker "$qq6_ctl" \
+  >"$qq6_dir/mock.log" 2>&1 &
+qq6_pid=$!
+qq6_up=0
+for _ in $(seq 1 100); do
+  curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${qq6_port}/" 2>/dev/null && { qq6_up=1; break; }
+  kill -0 "$qq6_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if [ "$qq6_up" != 1 ]; then
+  say FAIL "the mock upstream did not come up on ${qq6_port}, so the mid-stream fault cannot be proven to fire: $(tail -c 200 "$qq6_dir/mock.log" | tr '\n' ' ')"
+else
+  printf '%s' '{"stream-error":true}' >"$qq6_ctl"
+  for d in anthropic openai responses gemini bedrock cohere; do
+    qq6_cell="{\"ingress_dialect\":\"$d\",\"egress_dialect\":\"$d\",\"outcome\":\"stream_upstream_error\",\"mock_control\":{\"stream-error\":true}}"
+    qq6_req="$(qq_build "$qq6_cell")"
+    qq6_path="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["path"])' "$qq6_req")"
+    python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["body"])' "$qq6_req" >"$qq6_dir/body.$d"
+    curl -sS -m 10 -N -X POST "http://127.0.0.1:${qq6_port}${qq6_path}" \
+      -H 'Content-Type: application/json' --data-binary "@$qq6_dir/body.$d" -o "$qq6_dir/out.$d" 2>/dev/null
+    if grep -q 'oracle: upstream failed mid-stream' "$qq6_dir/out.$d"; then
+      say PASS "mid-stream fault fires for $d: the cell's declared stream reached the mock's stream-error arm"
+    else
+      say FAIL "mid-stream fault did NOT fire for $d — the mock answered $(head -c 120 "$qq6_dir/out.$d" | tr '\n' ' ')"
+    fi
+  done
+  # …and the SAME control against a BUFFERED request of the same dialect is the happy path, which is
+  # what the six cells were recording: the fault is reached by the request's shape, not by the control.
+  qq6_buf="$(qq_build '{"ingress_dialect":"anthropic","egress_dialect":"anthropic","outcome":"stream_upstream_error","mock_control":{"stream-error":true},"stream":false}')"
+  python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["body"])' "$qq6_buf" >"$qq6_dir/body.buffered"
+  curl -sS -m 10 -X POST "http://127.0.0.1:${qq6_port}/v1/messages" -H 'Content-Type: application/json' \
+    --data-binary "@$qq6_dir/body.buffered" -o "$qq6_dir/out.buffered" 2>/dev/null
+  grep -q 'oracle: upstream failed mid-stream' "$qq6_dir/out.buffered" \
+    && say FAIL "a BUFFERED request reached the mid-stream fault, so this case proves nothing about the request's shape" \
+    || say PASS "the same control against a BUFFERED request is still the happy path (the shape is what reaches the fault)"
+  kill "$qq6_pid" 2>/dev/null || true
+  wait "$qq6_pid" 2>/dev/null || true
+fi
+
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN${skips:+ (with $skips skipped)}" || { echo "replay selftest: RED ($fails)"; exit 1; }
