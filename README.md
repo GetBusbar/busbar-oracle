@@ -152,9 +152,37 @@ exactly as before, so recordings made under that layout stay verifiable.
 | `fetch-golden` | `fetch-golden.sh` | fetch and digest-verify a pinned golden binary |
 | `mock` | `mock-upstream.py` | the multi-dialect mock upstream |
 | `capture-ws` | `capture-ws.py` | the `ws` driver — drive and record one duplex session |
+| — | `plane-subject.sh` | the `plane` driver — record one mcp/a2a cell through the product's rig subject |
 
 Also available: `replay-selftest`, `fetch-plugin`, `rigs-ledger`, `apply-mutation`,
 `build-request`, `capture`, `fixture-gate-selftest`.
+
+### The `plane` driver
+
+A cell whose plane is not one the recorder drives natively (`llm`, `core`, `streams`) and
+which declares no `driver` of its own is recorded through **the product's own conformance
+rig subject**. There is no plane this tool refuses by name: a plane is recordable when its
+rig can drive the cell, and that is decided per cell, never per plane.
+
+`plane-subject.sh` looks for `<product-root>/scripts/<plane>-subject/h2-lib.sh` — the path
+**derived from the plane name**, not from a table — sources it, and drives the helpers
+every one of that plane's own gating scenarios drives (`h2_boot`, `h2_mint`, `h2_bind`,
+`h2_usage`, `h2_egress_count`). It owns no config template, no registration, no card
+signing and no token minting: if the rig's boot changes, this changes with it. What comes
+back is assembled by the recorder's own `capture.py`, so a plane cell carries the same
+`status` / `headers` / `body` / `effects` (usage Δ, metrics Δ, audit Δ, egress) as every
+other cell.
+
+What a rig can drive is **stated**, in `plane_scenario()`: the transport and method must be
+the ones the rig's `h2_call` actually speaks, the obligation must be `handle` (busbar
+ANSWERING a caller — the `issue` half of an exchange is observed as egress but cannot be
+sent), and the outcome must have a mechanism the rig really has. Anything else is the
+recorder's **ordinary `needs_fixture` gap row with the rig named in it** — the same row a
+missing backend gets, owed exactly as much. A rig that *broke* is red, never a recorded
+cell.
+
+For a product that ships no rig for a plane, every cell of that plane is that same named
+gap, naming the path a rig would live at. Nothing is ever "proven somewhere else".
 
 ### The `ws` driver
 

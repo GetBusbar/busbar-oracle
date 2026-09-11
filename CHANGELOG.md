@@ -4,6 +4,89 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.15
+
+Three defects measured against the product's pinned harness, all of the same kind: a
+recorder that looked confident and recorded something other than what the cell names.
+
+- **A cell's rule set is no longer a stopwatch reading.** `billing|key-usage|after-upstream-down`
+  recorded a different `applied` set on 3 of 5 consecutive runs of the same binary — and `applied` is
+  COMPARED (diff-cells.py's `norm.rules`), where `metrics.timing` may never be exempted, for the good
+  reason stated there. Two independent halves, both closed:
+
+  *The delta could report that time had passed.* `busbar_lane_recovery_hint_ms` counts DOWN the
+  milliseconds until a tripped lane may be retried, so two scrapes a second apart read 33000 and
+  32000 with busbar having done nothing in between. `normalize.py` already drops that sample from the
+  recorded cell — but only AFTER the delta has said it changed, so the `metrics.timing` rule fired on
+  the runs where the countdown crossed a boundary and not on the others. `capture.py` now drops a
+  wall-clock COUNTDOWN before it can be the reason a rule fired. **No recorded byte moves**: the key
+  never survived normalization anyway, so a delta with it and a delta without it produce the same
+  `effects.metrics`. The breaker's state is not lost with it — `busbar_lane_state`,
+  `busbar_lane_available` and `busbar_lane_available_permits` are the state-transition contract, and
+  none of them is a countdown.
+
+  *The settle probe and the snapshot did not see the same metric set.* `settle_then_snapshot()` polls
+  until two consecutive reads agree and then snapshots, but the probe digested `/metrics` through a
+  blanket `grep -v '_seconds'`: every duration summary AND its sample count was invisible to the
+  fixed point while the snapshot a fraction of a second later captured the whole exposition — and the
+  countdown, which carries no `_seconds`, was IN the fixed point, where it can never settle, so the
+  loop spun out its bound on every cell with a tripped lane and snapshotted at an arbitrary moment.
+  `_settle_metrics_view()` keeps what moves when, and only when, a request is OBSERVED
+  (`_seconds_count`, `_seconds_bucket`) and drops what moves with the WALL CLOCK (a summary's
+  sliding-window quantiles, `busbar_uptime_seconds`, `process_cpu_seconds_total`, the countdown).
+  busbar observes a request's duration after it has answered the client, so this is what makes
+  `busbar_request_duration_seconds_sum` a deterministic part of the delta rather than a race.
+
+  **Both fixes are recorder-side.** The same flips could be closed in `normalize.py`, but every cell
+  of a committed golden was written by the current normalizer, so that would take effect only by
+  moving the bytes of cells recorded correctly. Measured after: six consecutive recordings of
+  `billing|key-usage|after-upstream-down` are byte-identical, and three of
+  `llm|anthropic|anthropic|request|{ok,ok_stream}` are byte-identical with `metrics.timing` firing on
+  every one. golden/1.5.5 replayed against itself stays 928/928 PASS.
+
+- **A request streams because the CELL says so, not because of an outcome's name.**
+  `build-request.py` decided streaming with `oc in ("ok_stream", "ok_stream_array")` — two outcome
+  names. A `stream_upstream_error` cell declares `mock_control: {"stream-error": true}`, and the
+  mock gates that fault on `want_stream and stream_error`, so every one of those cells was sent
+  BUFFERED, the fault never fired, and the HAPPY PATH was recorded under the name of the failure —
+  identically on both binaries, which is the worst shape a green can have. `declares_stream(cell)`
+  reads the cell, most specific first: an explicit `stream` field (believed in both directions),
+  then a `mock_control` only a stream can reach, then the two outcome names LAST. `stream` is now
+  part of the emitted request as well, so no consumer re-derives it from a body that — for gemini
+  and bedrock — does not contain it.
+
+  **This changes recordings.** A `stream_upstream_error` cell now records the failure it is named
+  for; any earlier recording of one is a recording of the happy path.
+
+- **The mcp/a2a planes are RECORDED, through the product's own conformance rigs.** `record.sh`
+  refused them by PLANE, twice — at the argument gate and again per cell, with a row that said
+  "never owed" — so 1,382 cells were unowed by category and nothing downstream could notice the
+  category swallowing a cell a rig can in fact drive. Both refusals are deleted. `plane-subject.sh`
+  sources the product's own rig library (`<repo>/scripts/<plane>-subject/h2-lib.sh`, the path
+  derived from the plane name) and drives its own helpers, exactly as the product's gating scenarios
+  do; the answer is assembled by the recorder's own `capture.py`. What a rig cannot drive is the
+  ORDINARY `needs_fixture` gap row with the rig NAMED in it — never a skip that says a plane is
+  proven somewhere else — and a rig that broke is red.
+
+  Measured against busbar 1.6.0: eleven cells that were blanket skips now record, with their real
+  usage deltas, audit chains and egress.
+
+- **A cell id is not a path.** Every cell was written to `${id//|/__}`, escaping the one separator
+  the llm and core planes happen to use. An mcp method is `tools/call` and an a2a one is
+  `GET /.well-known/agent-card.json`, so `cells/<safe>.json` was a path into a directory that does
+  not exist. `cell_file_name()` keeps the pipe rule byte-for-byte and maps every other non-portable
+  character to `_`; `diff-cells.py` and `merge-recordings.py` state the same rule. No collisions over
+  the product's 2,332 ids, and every one of the 928 committed golden cell files is still the name the
+  rule gives its id.
+
+- **`text.port` now covers a header value and a JSON string.** The rule's own sentence — a loopback
+  address with an ephemeral port is the harness's draw, never busbar's contract — was implemented
+  for text bodies and stderr lines alone. Conformance rigs take FREE ports, so a plane refusal's
+  `www-authenticate: … http://127.0.0.1:<ephemeral>/…` differed on every run. The `\d{2,5}` bound is
+  the original rule's and is load-bearing: `127.0.0.1:1` and `127.0.0.1:9` are config constants a
+  cell is about. Re-applying the rule to every string of all 928 committed golden cells moves not
+  one byte.
+
 ## 0.3.14
 
 - **A cell's own `mock_control` now reaches the mock on EVERY driver, and a `pre` step's own control

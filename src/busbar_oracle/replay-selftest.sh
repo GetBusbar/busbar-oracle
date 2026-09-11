@@ -3246,7 +3246,7 @@ eval "$(sed -n '/^_settle_metrics_view()/,/^}/p' "${here}/record.sh")"
 if ! declare -F _settle_metrics_view >/dev/null 2>&1; then
   say FAIL "record.sh defines no _settle_metrics_view(): the settle probe's metric view is not a rule anything can drive"
 else
-pp_expo() {  # <count> <quantile> <uptime> <cpu>
+pp_expo() {  # <count> <quantile> <uptime> <cpu> [recovery-hint-ms]
   cat <<EOF
 # HELP busbar_requests_total requests
 # TYPE busbar_requests_total counter
@@ -3258,9 +3258,10 @@ busbar_request_duration_seconds_count{pool="p"} $1
 busbar_upstream_latency_seconds_bucket{le="0.1"} $1
 busbar_uptime_seconds $3
 process_cpu_seconds_total $4
+busbar_lane_recovery_hint_ms{lane="l"} ${5:-33000}
 EOF
 }
-pp_view() { pp_expo "$1" "$2" "$3" "$4" | _settle_metrics_view; }
+pp_view() { pp_expo "$1" "$2" "$3" "$4" "${5:-33000}" | _settle_metrics_view; }
 
 # (pp1) the sample count is IN the view — the half the old probe could not see at all
 if pp_view 3 0.011 41 1.25 | grep -q '^busbar_request_duration_seconds_count{pool="p"} 3$'; then
@@ -3274,8 +3275,11 @@ pp_view 3 0.011 41 1.25 | grep -q 'busbar_upstream_latency_seconds_bucket' \
   && say PASS "settle probe: a latency histogram's bucket count is part of the fixed point" \
   || say FAIL "settle probe: a _seconds_bucket sample is filtered out of the fixed point"
 
-# (pp3) A FIXED POINT THAT CAN ACTUALLY BE REACHED. Only the clock moved: the view must not.
-if [ "$(pp_view 3 0.011 41 1.25)" = "$(pp_view 3 0.038 55 9.75)" ]; then
+# (pp3) A FIXED POINT THAT CAN ACTUALLY BE REACHED. Only the clock moved: the view must not. The
+# countdown is in here for the reason that cost the most to find — `busbar_lane_recovery_hint_ms`
+# carries no `_seconds`, so the OLD blanket filter left it in the fixed point and the loop spun out
+# its bound on every cell with a tripped lane, snapshotting at an arbitrary moment.
+if [ "$(pp_view 3 0.011 41 1.25 33000)" = "$(pp_view 3 0.038 55 9.75 31000)" ]; then
   say PASS "settle probe: quantiles, uptime and cpu seconds move with the clock and do NOT move the view (the loop can still settle)"
 else
   say FAIL "settle probe: a clock-driven sample is in the view, so the fixed point can never be reached and every cell spins out its bound"

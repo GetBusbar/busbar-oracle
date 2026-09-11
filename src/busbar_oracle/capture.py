@@ -9,7 +9,9 @@ The response half is the bytes busbar returned. The effects half is what busbar 
 ("meters were metered, audits audited") — expressed as DELTAS between two snapshots taken around the
 request, so absolute counters (which differ per run) never enter a golden:
   effects.usage    numeric fields of GET /api/v1/admin/keys/{id}/usage, after - before
-  effects.metrics  prometheus samples (name + labels) whose value changed, after - before
+  effects.metrics  prometheus samples (name + labels) whose value changed, after - before — except a
+                   wall-clock COUNTDOWN (`recovery_hint_ms`), which changes because time passed and
+                   never because busbar did anything; see COUNTDOWN_SAMPLE
   effects.audit    the admin-audit items added, plus the count: each added item as
                    {actor, action, resource, outcome, chain_ok} — chain_ok is computed here, against
                    the RAW (pre-normalization) hashes, before normalize.py ever sees them: an item's
@@ -96,6 +98,25 @@ def parse_metrics(text: str) -> dict:
     return out
 
 
+# A SAMPLE WHOSE VALUE IS A WALL-CLOCK COUNTDOWN IS NOT A DELTA.
+# `busbar_lane_recovery_hint_ms` counts DOWN the milliseconds until a tripped lane may be retried, so
+# two scrapes a second apart read 33000 and 32000 with busbar having done nothing in between.
+# normalize.py already drops such a sample from the recorded cell (`metrics.timing`) — but it drops
+# it AFTER the delta has recorded that it CHANGED, and the cell's `applied` set therefore carries
+# `metrics.timing` on the runs where the countdown crossed a boundary between the two scrapes and not
+# on the others. Measured on `billing|key-usage|after-upstream-down`: 3 of 5 consecutive runs.
+# `applied` is compared — diff-cells.py's `norm.rules` class — and metrics.timing may never be
+# exempted from that comparison, for the good reason stated there (a one-sided drop is how a money
+# figure leaves a cell with nothing saying so). So a cell's rule set was a stopwatch reading.
+#
+# Dropping it HERE, before it can be the reason a rule fired, moves no recorded byte: the key never
+# survived normalization anyway, so a delta with it and a delta without it produce the same
+# `effects.metrics`. What changes is only that `applied` stops depending on how the second fell.
+# The breaker's actual state is not lost with it: `busbar_lane_state`, `busbar_lane_available` and
+# `busbar_lane_available_permits` are the state-transition contract, and none of them is a countdown.
+COUNTDOWN_SAMPLE = re.compile(r"recovery_hint_ms(\{|$)")
+
+
 def metrics_delta(before_dir: str, after_dir: str):
     try:
         b = parse_metrics(open(os.path.join(before_dir, "metrics.txt")).read())
@@ -115,6 +136,8 @@ def metrics_delta(before_dir: str, after_dir: str):
         return {"unavailable": True}
     out = {}
     for k in sorted(set(a) | set(b)):
+        if COUNTDOWN_SAMPLE.search(k):
+            continue
         d = a.get(k, 0.0) - b.get(k, 0.0)
         if d != 0:
             out[k] = int(d) if d == int(d) else d
@@ -305,6 +328,29 @@ def selftest() -> int:
         open(os.path.join(a, "metrics.txt"), "w").write("busbar_requests_total{pool=\"p\"} 41\n")
         os.remove(os.path.join(b, "metrics.txt"))
         say(metrics_delta(b, a) == {"unavailable": True}, "metrics: before scrape absent -> unavailable")
+
+        # A WALL-CLOCK COUNTDOWN IS NOT A DELTA. `busbar_lane_recovery_hint_ms` ticks DOWN on its own
+        # between two scrapes; normalize.py drops it from the recorded cell, but only AFTER the delta
+        # has said it changed — so the cell's `applied` set carried `metrics.timing` on the runs where
+        # the countdown crossed a boundary and not on the others (measured on
+        # `billing|key-usage|after-upstream-down`: 3 of 5 consecutive runs), and `applied` is compared.
+        open(os.path.join(b, "metrics.txt"), "w").write(
+            'busbar_lane_recovery_hint_ms{lane="l"} 33000\nbusbar_requests_total{pool="p"} 40\n')
+        open(os.path.join(a, "metrics.txt"), "w").write(
+            'busbar_lane_recovery_hint_ms{lane="l"} 32000\nbusbar_requests_total{pool="p"} 40\n')
+        say(metrics_delta(b, a) == {},
+            "metrics: a countdown that ticked while busbar did nothing is NOT a delta (so no rule fires on it)")
+        open(os.path.join(a, "metrics.txt"), "w").write(
+            'busbar_lane_recovery_hint_ms{lane="l"} 32000\nbusbar_requests_total{pool="p"} 41\n')
+        say(metrics_delta(b, a) == {'busbar_requests_total{pool="p"}': 1},
+            "metrics: the countdown is dropped and everything beside it is still the real delta")
+        open(os.path.join(b, "metrics.txt"), "w").write(
+            'busbar_lane_state{lane="l"} 2\nbusbar_request_duration_seconds_sum{pool="p"} 0.5\n')
+        open(os.path.join(a, "metrics.txt"), "w").write(
+            'busbar_lane_state{lane="l"} 0\nbusbar_request_duration_seconds_sum{pool="p"} 0.9\n')
+        say(metrics_delta(b, a) == {'busbar_lane_state{lane="l"}': -2,
+                                    'busbar_request_duration_seconds_sum{pool="p"}': 0.4},
+            "metrics: the breaker's own STATE, and a duration a request really moved, are deltas as before")
     finally:
         shutil.rmtree(w, ignore_errors=True)
     print(f"\ncapture selftest: {'GREEN' if not fails else f'RED ({fails} failing)'}")

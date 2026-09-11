@@ -19,6 +19,7 @@ src/busbar_oracle/merge-recordings.py
 src/busbar_oracle/mock-upstream.py
 src/busbar_oracle/normalize.py
 src/busbar_oracle/oracle-config.sh
+src/busbar_oracle/plane-subject.sh
 src/busbar_oracle/record.sh
 src/busbar_oracle/renormalize.sh
 src/busbar_oracle/replay-selftest.sh

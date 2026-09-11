@@ -771,6 +771,10 @@ except Exception: sys.exit(1)' "$f" || { pending=1; break; }
 #   * `quantile="..."` samples — a summary re-derives these from a sliding window, so they move on
 #     their own with the clock. In the fixed point they would make it unreachable; and they are
 #     dropped by normalize.py's `metrics.timing` anyway, so they decide no recorded byte.
+#   * `busbar_lane_recovery_hint_ms` — a COUNTDOWN of the milliseconds until a tripped lane may be
+#     retried. It ticks down with the wall clock, so a fixed point holding it is unreachable; and
+#     capture.py drops it from the delta for the same reason, so it decides no recorded byte and no
+#     rule either.
 #   * `busbar_uptime_seconds`, `process_cpu_seconds_total`, and anything else whose name carries
 #     `_seconds` without being a count or a bucket — wall-clock gauges. Same argument, more sharply:
 #     a fixed point containing a value that changes every tick can never be reached, and the loop
@@ -789,6 +793,7 @@ _settle_metrics_view() {  # stdin: a /metrics exposition -> stdout: the settle l
   awk '
     /^#/                                       { next }
     /quantile=/                                { next }
+    /recovery_hint_ms/                         { next }
     /_seconds_count([{ ]|$)|_seconds_bucket\{/ { print; next }
     /_seconds/                                 { next }
                                                { print }
