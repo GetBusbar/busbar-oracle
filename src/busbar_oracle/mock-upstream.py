@@ -86,6 +86,13 @@ from urllib.parse import unquote
 
 MARKER = "oracle-marker"
 IN_TOK, OUT_TOK = 11, 7
+# The server-side tool-use token SUB-bucket Vertex reports beside `promptTokenCount` on a turn
+# that consulted a tool (measured 32 against an 18-token prompt on a real capture -- see
+# `llm|gemini|gemini|request|ok_tool_use_tokens`'s own `why`). Fixed and smaller than IN_TOK, as a
+# sub-count of the prompt total must be, and unrelated to a real vendor ratio: every figure in
+# this file is a fixed literal chosen for JSON round-trip stability, never a proportion measured
+# from a live account.
+TOOL_USE_PROMPT_TOK = 4
 _capture_seq = itertools.count()
 
 # THE VERB VOCABULARY, IN ONE PLACE. Every outage this mock can be asked for is named here, and a
@@ -93,7 +100,7 @@ _capture_seq = itertools.count()
 # ignores the outage a cell ordered records the SUCCESS path under that cell's name, identically on
 # the golden and the candidate, so the cell proves the opposite of what it claims.
 VERBS = frozenset({"down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation",
-                   "tool-call", "ws-error", "ws-close"})
+                   "tool-call", "tool-use-tokens", "ws-error", "ws-close"})
 
 
 class UnresolvableControl(Exception):
@@ -398,6 +405,18 @@ def bedrock_tool_call(model, marker):
     body["output"]["message"]["content"] = [{"toolUse": {"toolUseId": TOOL_ID_BEDROCK,
                                                          "name": TOOL_NAME, "input": TOOL_ARGS}}]
     body["stopReason"] = "tool_use"
+    return j(body)
+
+
+def gemini_tool_use_tokens(model, marker):
+    """The ANSWER-side money term: a native `generateContent` reply reporting
+    `usageMetadata.toolUsePromptTokenCount` beside `promptTokenCount` -- the server-side sub-bucket
+    Vertex reports for the tokens a tool consultation added to the prompt. Text-only content on
+    purpose: the cell's whole subject is the usage field, not a tool-call block (that is
+    `ok_tool_call`'s subject, and stacking both onto one cell would leave neither provable alone).
+    """
+    body = json.loads(gemini(model, marker).decode())
+    body["usageMetadata"]["toolUsePromptTokenCount"] = TOOL_USE_PROMPT_TOK
     return j(body)
 
 
@@ -1251,6 +1270,10 @@ class H(BaseHTTPRequestHandler):
         # own shape. Like `citation` it touches nothing else — every other answer in this file
         # is byte-identical under it, so a golden recorded without the verb is unaffected.
         tool_call = (ctl == "tool-call")
+        # `tool-use-tokens` answers gemini's CHAT leaf with the native `toolUsePromptTokenCount`
+        # money term added to `usageMetadata`. Gemini-only and chat-only, like `citation` is
+        # responses-only: every other dialect and every other gemini op is byte-identical under it.
+        tool_use_tokens = (ctl == "tool-use-tokens")
 
         # ── THE SIX LEAF OPS, AHEAD OF THE CHAT ROUTES. Two of them share a path with something
         # else and are told apart by the BODY, exactly as busbar tells them apart: `/model/{m}/invoke`
@@ -1337,6 +1360,8 @@ class H(BaseHTTPRequestHandler):
             gop = gemini_generate_op(req)
             if tool_call and gop == "chat":
                 return self._send(200, gemini_tool_call(model, marker))
+            if tool_use_tokens and gop == "chat":
+                return self._send(200, gemini_tool_use_tokens(model, marker))
             if gop == "speech":
                 return self._send(200, gemini_speech(model, marker))
             if gop == "transcription":
@@ -1427,7 +1452,8 @@ def selftest() -> int:
     except UnresolvableControl:
         say(True, "a misspelt bare verb is refused, not served healthy")
     # …and every verb the docstring/dispatch names is in the vocabulary the refusal is judged against
-    say(all(x in VERBS for x in ("down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation")),
+    say(all(x in VERBS for x in ("down", "slow", "429", "5xx", "401", "cut", "stream-error", "citation",
+                                 "tool-call", "tool-use-tokens")),
         "the verb vocabulary covers every verb do_POST dispatches on")
 
     # ── A `cut` ON /v1/responses CUTS A STREAM, NOT A JSON OBJECT (0.3.11) ────────────────────────
@@ -1578,6 +1604,31 @@ def selftest() -> int:
             st, _, got2 = post(path, body)
             say(got2 == healthy(m, MARKER),
                 f"…and {path}'s healthy answer is byte-identical without the verb")
+
+        # ── THE `tool-use-tokens` VERB: gemini's CHAT leaf only, every other door and op unmoved ──
+        gemini_path = "/v1beta/models/m-gemini:generateContent"
+        gemini_body = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}
+        st, _, got = post(gemini_path, gemini_body, "tool-use-tokens")
+        answered = json.loads(got)
+        say(st == 200
+            and answered.get("usageMetadata", {}).get("toolUsePromptTokenCount") == TOOL_USE_PROMPT_TOK,
+            f"gemini generateContent under `tool-use-tokens` reports toolUsePromptTokenCount={TOOL_USE_PROMPT_TOK}")
+        say(got == gemini_tool_use_tokens("m-gemini", MARKER),
+            "…byte-identical to the function this dispatches to (no drift between the two)")
+        st2, _, got2 = post(gemini_path, gemini_body)
+        say(got2 == gemini("m-gemini", MARKER),
+            "…and the healthy gemini chat answer is byte-identical without the verb")
+        # speech/transcription are untouched by the verb: only `gop == "chat"` answers it.
+        speech_body = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                       "generationConfig": {"responseModalities": ["AUDIO"]}}
+        st3, _, got3 = post(gemini_path, speech_body, "tool-use-tokens")
+        say(got3 == gemini_speech("m-gemini", MARKER),
+            "…and gemini SPEECH under `tool-use-tokens` is unmoved (the verb names a chat-only term)")
+        # RED PLANT (proves this case would have caught the field's absence): a body with no
+        # `toolUsePromptTokenCount` member must NOT satisfy the assertion above.
+        say(json.loads(gemini("m-gemini", MARKER)).get("usageMetadata", {}).get(
+            "toolUsePromptTokenCount") is None,
+            "…and the plain healthy answer (the plant) has no such member -- the case is not vacuous")
 
         # EVERY ANSWER IN THIS FILE IS A PURE FUNCTION OF THE REQUEST. The oracle records a cell only
         # when two runs agree byte for byte, so a mock that drew anything per call would make every

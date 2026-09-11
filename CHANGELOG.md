@@ -4,6 +4,27 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.18
+
+The op axis (0.3.17) gave the mock a CALL and six non-chat leaves, but one money term on the
+chat leaf itself stayed unanswerable: Gemini's `usageMetadata.toolUsePromptTokenCount`, the
+server-side sub-bucket Vertex reports beside `promptTokenCount` for a turn that consulted a
+tool. A prior control for it was stripped (see `gemini-tool-use-token-term` in
+`accepted-gaps.json`) because it resolved to no verb and the mock silently served the tool-less
+200 under a cell name that claimed to pin the field.
+
+- **The mock learns `tool-use-tokens`**, a gemini-only, chat-only verb: `generateContent`'s
+  answer carries `toolUsePromptTokenCount` beside the ordinary counts; every other dialect,
+  every other gemini op (speech, transcription), and the healthy answer without the verb are
+  byte-identical to before it existed. Selftest: red-first (the dispatch branch was reverted,
+  the new case FAILed, then restored), plus a plant proving the healthy answer carries no such
+  member (the case is not vacuous).
+
+- **`ok_cachepoint_document` (bedrock) and `ok_citation` (responses)** needed no new tool code —
+  both fixtures shipped in 0.3.17's `build-request.py` / `mock-upstream.py` — only the recording.
+
+--version 0.3.18.
+
 ## 0.3.17
 
 The corpus could only ask busbar to have a CONVERSATION. busbar serves SEVEN operations, and six of
