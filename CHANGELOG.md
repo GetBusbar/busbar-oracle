@@ -4,6 +4,30 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.14
+
+- **A cell's own `mock_control` now reaches the mock on EVERY driver, and a `pre` step's own control
+  reaches it too.** Three drivers arrange the upstream and only two of them honoured the cell. The
+  built-in llm driver wrote `down` when `outcome` was `upstream_down` and read `.mock_control` not
+  at all, so a cell that named a verb the outcomes have no word for was recorded against a HEALTHY
+  upstream and passed — which is why no consumer has ever been able to record a mid-stream-failure
+  cell. And no driver honoured a `mock_control` written on a `pre` SETUP STEP, so a cell that primes
+  its state with a request that is supposed to fail primed the opposite state instead, and recorded
+  a cell whose id and `why` describe an outage that never happened.
+
+  The rule is now one function, `cell_mock_control(cell, outcome)`, which all three drivers and the
+  `pre` runner ask, and which is the only reader of `.mock_control` in the file: the cell's own
+  control wins where it names one, because it is the more specific statement and no `outcome` can
+  express a per-lane verb; `upstream_down` supplies `down` where the cell names nothing, which is
+  what every recording made so far assumed; an empty object is absence. A `pre` step's control is
+  written before the step and CLEARED after it, so a setup outage cannot leak into the request the
+  cell records. `replay-selftest.sh` drives the real function, extracted by name.
+
+  **THIS CHANGES RECORDINGS, WHICH IS THE POINT.** A cell whose control was previously dropped will
+  now record what it is about, and its bytes will differ from any recording made with 0.3.13 or
+  earlier. A consumer re-records those cells as parts and says so; no cell that named no control on
+  a driver that already honoured it is affected.
+
 ## 0.3.13
 
 **A figure that is a measurement of the body, counted twice.** `llm.stream|responses|cut` is the

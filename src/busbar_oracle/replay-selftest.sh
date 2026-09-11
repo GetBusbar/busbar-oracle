@@ -2883,6 +2883,54 @@ grep -q 'rm -f "\$OUT/cells/\$safe.json"' <<<"$nn_src" || nn_bad="${nn_bad} a pr
   && say PASS "record.sh captures the driver's exit status, asks script_cell_verdict for the verdict, and gives every selected cell a fresh raw dir and no stale cell file" \
   || say FAIL "record.sh's script path:${nn_bad}"
 
+# (nn2) A CELL'S OWN `mock_control` MUST REACH THE MOCK, ON EVERY DRIVER AND ON A `pre` STEP.
+#
+# Three drivers arrange the upstream and only two of them honoured the cell. The built-in llm driver
+# wrote `down` when `outcome` was `upstream_down` and read `.mock_control` NOT AT ALL, so the seven
+# llm cells that name one -- the six `stream_upstream_error` and `ok_citation` -- could never be
+# recorded as the thing they are about. And no driver honoured a `pre` STEP's own control, so
+# `billing|key-usage|after-upstream-down` primed its ledger against a HEALTHY upstream and recorded
+# a charged request under an id and a `why` that claim an outage: it is byte-identical to
+# `billing|key-usage|after-1`, both sha256 c4ed0dd0…ffa0.
+#
+# Drives the REAL cell_mock_control() out of record.sh, extracted by name exactly as the case above
+# extracts script_cell_verdict(), so a change to the rule changes this case with it.
+eval "$(sed -n '/^cell_mock_control()/,/^}/p' "${here}/record.sh")"
+mc_case() {  # <want> <cell-json> <outcome> <label>
+  local want="$1" cell="$2" outcome="$3" label="$4" got
+  got="$(cell_mock_control "$cell" "$outcome")"
+  [ "$got" = "$want" ] && say PASS "mock control: $label -> '${want}'" \
+                       || say FAIL "mock control: $label -> got '${got}', want '${want}'"
+}
+mc_case 'down' '{}' upstream_down \
+  "an upstream_down cell that names no control still gets the outage every recording so far assumed"
+mc_case '' '{}' ok \
+  "an ordinary cell arranges nothing"
+mc_case '{"stream-error":true}' '{"mock_control":{"stream-error":true}}' stream_upstream_error \
+  "a cell's own control is what is written, on the driver that used to drop it"
+mc_case '{"m-openai-chat":"down"}' '{"mock_control":{"m-openai-chat":"down"}}' ok \
+  "a per-lane control an outcome has no word for"
+mc_case '{"citation":true}' '{"mock_control":{"citation":true}}' upstream_down \
+  "the cell's own control WINS over the one its outcome implies: it is the more specific statement"
+mc_case '' '{"mock_control":{}}' ok \
+  "an empty control object arranges nothing, same as absence"
+
+# …and every one of the three drivers must ASK, including the `pre` runner, which must also CLEAR
+# what it wrote so a setup outage cannot leak into the request the cell records.
+mc_src="$(cat "${here}/record.sh")"
+mc_bad=""
+[ "$(grep -c 'cell_mock_control "' <<<"$mc_src")" -ge 5 ] \
+  || mc_bad="${mc_bad} not every driver asks for the control through the one function;"
+grep -q 'step_mc="\$(cell_mock_control "\$rq" "")"' <<<"$mc_src" \
+  || mc_bad="${mc_bad} a pre step's own control is still dropped;"
+grep -q '\[ -z "\$step_mc" \] || oracle_clear_control' <<<"$mc_src" \
+  || mc_bad="${mc_bad} a pre step's control is never cleared, so it leaks into the recorded request;"
+[ "$(grep -c 'mock_control // empty' <<<"$mc_src")" -eq 1 ] \
+  || mc_bad="${mc_bad} .mock_control is read somewhere other than cell_mock_control, so a driver can still disagree with the rule;"
+[ -z "$mc_bad" ] \
+  && say PASS "every driver, and the pre-step runner, arranges the upstream through cell_mock_control and clears what it wrote" \
+  || say FAIL "record.sh's control path:${mc_bad}"
+
 # (oo) AN `improvement` MAY NOT FORGIVE A CLASS THE DIFFER ITSELF RATES 10. MONEY_CLASSES is keyed
 # on the CLASS; the weight a divergence is scored with is keyed on the FAMILY. On the six
 # BODY_IS_CONTRACT families (admin.ops, boot.refusal, boot.warning, config.migrate, cli, ops.scrape

@@ -736,6 +736,35 @@ base64 <"$_webrequest_tarball" | tr -d '\n' >"$WORK/tmp/webrequest.b64"
   || fail_setup "the webrequest-hook tarball encoded to nothing" "base64 of ${_webrequest_tarball} produced an empty file"
 case "$(uname -sm)" in "Darwin arm64") ORACLE_TRIPLE=aarch64-apple-darwin ;; "Darwin x86_64") ORACLE_TRIPLE=x86_64-apple-darwin ;; "Linux aarch64"|"Linux arm64") ORACLE_TRIPLE=aarch64-unknown-linux-gnu ;; *) ORACLE_TRIPLE=x86_64-unknown-linux-gnu ;; esac
 
+# ── WHAT A CELL'S UPSTREAM IS TOLD TO DO, DECIDED ONCE ──────────────────────────────────────────
+#
+# A cell says what it wants its upstream to do in TWO ways and they are not alternatives: an
+# `outcome` names a busbar-side disposition the recorder knows how to arrange, and a `mock_control`
+# names the mock verb directly, for the arrangements `outcome` has no word for. The built-in driver
+# only ever honoured the first: it wrote `down` when `outcome` was `upstream_down` and IGNORED
+# `.mock_control` completely, while the script and concurrent drivers beside it honoured the cell's
+# own control. So on that driver a cell could declare an outage, be recorded against a HEALTHY
+# upstream, and pass — which is what `billing|key-usage|after-upstream-down` is: its `pre` orders
+# `{"m-openai-chat": "down"}`, the control never landed, and the cell recorded a charged request
+# while its id and its `why` claim an upstream that was down. It is byte-identical to
+# `billing|key-usage|after-1` for that reason, and the same hole is why the six
+# `llm|*|request|stream_upstream_error` cells have never been recordable.
+#
+# ONE FUNCTION, SO NO DRIVER CAN DISAGREE WITH ANOTHER, and taking only the cell and the outcome so
+# replay-selftest.sh drives THIS rule rather than a restatement of it (same discipline as
+# script_cell_verdict above). The cell's own control WINS where it names one, because it is the
+# more specific statement and because no `outcome` can express a per-lane verb; `upstream_down`
+# supplies `down` where the cell names nothing, which is what every recording made so far assumed.
+cell_mock_control() {  # <cell-json> <outcome> -> the control to write, or nothing
+  local cell="${1-}" outcome="${2-}" mc
+  mc="$(jq -c '.mock_control // empty' <<<"$cell" 2>/dev/null)"
+  if [ -n "$mc" ] && [ "$mc" != "{}" ] && [ "$mc" != "null" ]; then
+    printf '%s' "$mc"; return 0
+  fi
+  [ "$outcome" = upstream_down ] && printf 'down'
+  return 0
+}
+
 run_pre_request() {  # <request-json {method,path,headers,body,auth,listener}> — unrecorded setup call
   local rq="$1" m pth lst tok port
   m="$(jq -r .method <<<"$rq")"; pth="$(jq -r .path <<<"$rq")"; lst="$(jq -r '.listener // "admin"' <<<"$rq")"
@@ -746,6 +775,24 @@ run_pre_request() {  # <request-json {method,path,headers,body,auth,listener}> �
   [ -z "$tok" ] || h+=(-H "Authorization: Bearer ${tok}")
   local b; b="$(jq -r '.body // empty' <<<"$rq")"
   [ -z "$b" ] || h+=(-H "Content-Type: application/json")
+  # A `pre` STEP'S OWN `mock_control` IS THE STEP'S, AND IT WAS DROPPED ON THE FLOOR. A setup call
+  # that primes the ledger with a FAILED request -- "spend a request against an upstream that is
+  # down, then read the usage back" -- says so on the step, because the control has to be in force
+  # for that step and gone before the cell's own request runs. Only the cell-level control was ever
+  # written, so the step ran against a HEALTHY upstream and primed the opposite state: that is why
+  # `billing|key-usage|after-upstream-down` is byte-identical to `billing|key-usage|after-1` and
+  # records a charged request under an id and a `why` that claim an upstream that was down.
+  #
+  # Written before the call and cleared after it, in this function, so the control cannot leak into
+  # whatever the cell records next -- which is the reason it could not simply be hoisted to the cell.
+  local step_mc; step_mc="$(cell_mock_control "$rq" "")"
+  if [ -n "$step_mc" ]; then
+    oracle_write_control "$CONTROL" "$MOCK_PORT" "$step_mc" || {
+      echo "pre: the step's mock control never landed (wrote '${step_mc}' to ${CONTROL})"
+      oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1
+      return 1
+    }
+  fi
   # A `pre` IS THE CELL'S SETUP, AND IT WAS NEVER CHECKED. The status was printed into pre.log and
   # the caller ignored it, so a `pre` that never reached busbar at all (curl's own "000": connection
   # refused, a timeout, a boot window that had not opened yet) left the cell recording the UNPREPARED
@@ -758,6 +805,7 @@ run_pre_request() {  # <request-json {method,path,headers,body,auth,listener}> �
   # can never be right is no answer at all.
   local code
   code="$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X "$m" "http://127.0.0.1:${port}${pth}" "${h[@]}" ${b:+--data-binary "$b"} 2>&1)"
+  [ -z "$step_mc" ] || oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1
   echo "pre $m $pth -> $code"
   case "$code" in [1-5]??) return 0 ;; *) return 1 ;; esac
 }
@@ -872,8 +920,8 @@ record_concurrent_cell() {  # <id> <cell-json> <raw-dir> <safe>
   while IFS= read -r kv; do hdr_args+=(-H "$kv"); done < <(jq -r '.request.headers // {} | to_entries[] | "\(.key): \(.value)"' <<<"$cell")
   [ -z "$token" ] || hdr_args+=(-H "Authorization: Bearer ${token}")
   port="$LISTEN_PORT"; [ "$listener" = admin ] && port="$ADMIN_PORT"
-  mc="$(jq -c '.mock_control // empty' <<<"$cell")"
-  if [ -n "$mc" ] && [ "$mc" != "{}" ]; then
+  mc="$(cell_mock_control "$cell" "")"
+  if [ -n "$mc" ]; then
     oracle_write_control "$CONTROL" "$MOCK_PORT" "$mc" \
       || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; return; }
   fi
@@ -986,8 +1034,8 @@ record_ws_cell() {  # <id> <cell-json> <raw-dir> <safe>
          timeout_secs: ($w.timeout_secs // null), script: ($w.script // []), close: ($w.close // null),
          headers: (($w.headers // {}) + (if $tok == "" then {} else {"Authorization": ("Bearer " + $tok)} end))}' <<<"$cell")"
   printf '%s\n' "$spec" >"$raw/ws-spec.json"
-  mc="$(jq -c '.mock_control // empty' <<<"$cell")"
-  if [ -n "$mc" ] && [ "$mc" != "{}" ]; then
+  mc="$(cell_mock_control "$cell" "")"
+  if [ -n "$mc" ]; then
     oracle_write_control "$CONTROL" "$MOCK_PORT" "$mc" \
       || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; return; }
   fi
@@ -1243,8 +1291,8 @@ PY
     [ -s "$raw/request.body" ] && hdr_args+=(-H "Content-Type: application/json")
     port="$LISTEN_PORT"; [ "$listener" = admin ] && port="$ADMIN_PORT"
     local_m=(-X "$method" --data-binary "@$raw/request.body"); [ "$method" = HEAD ] && local_m=(--head)
-    mc="$(jq -c '.mock_control // empty' <<<"$cell")"
-    if [ -n "$mc" ] && [ "$mc" != "{}" ]; then
+    mc="$(cell_mock_control "$cell" "$outcome")"
+    if [ -n "$mc" ]; then
       oracle_write_control "$CONTROL" "$MOCK_PORT" "$mc" \
         || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; continue; }
     fi
@@ -1288,9 +1336,11 @@ PY
   # a signed request already carries its Authorization (SigV4); a bearer cell gets the token here
   [ "$auth" = sigv4-signed ] || [ -z "$token" ] || hdr_args+=(-H "Authorization: Bearer ${token}")
 
-  if [ "$outcome" = upstream_down ]; then
-    oracle_write_control "$CONTROL" "$MOCK_PORT" "down" \
-      || { record "$id" FAIL "mock control write never landed" "wrote 'down' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; continue; }
+  # THE CELL'S OWN CONTROL, or the one its outcome implies — see cell_mock_control().
+  mc="$(cell_mock_control "$cell" "$outcome")"
+  if [ -n "$mc" ]; then
+    oracle_write_control "$CONTROL" "$MOCK_PORT" "$mc" \
+      || { record "$id" FAIL "mock control write never landed" "wrote '${mc}' to ${CONTROL}"; oracle_clear_control "$CONTROL" "$MOCK_PORT" >/dev/null 2>&1; continue; }
   fi
   settle_then_snapshot "$raw/before" "$kid"
   ls "$WORK/egress" 2>/dev/null | LC_ALL=C sort >"$raw/egress.before"
