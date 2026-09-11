@@ -6,6 +6,7 @@ src/busbar_oracle/apply-mutation.py
 src/busbar_oracle/build-request.py
 src/busbar_oracle/capture-concurrent.py
 src/busbar_oracle/capture-exec.py
+src/busbar_oracle/capture-ws.py
 src/busbar_oracle/capture.py
 src/busbar_oracle/cli.py
 src/busbar_oracle/diff-cells.py
@@ -24,6 +25,7 @@ src/busbar_oracle/replay-selftest.sh
 src/busbar_oracle/replay.sh
 src/busbar_oracle/rigs-ledger.sh
 src/busbar_oracle/selftest.sh
+src/busbar_oracle/wsframe.py
 src/busbar_oracle.egg-info/PKG-INFO
 src/busbar_oracle.egg-info/SOURCES.txt
 src/busbar_oracle.egg-info/dependency_links.txt
@@ -36,3 +38,9 @@ src/busbar_oracle/fixtures/selftest-recording/cells/self__a__ok.json
 src/busbar_oracle/fixtures/selftest-recording/cells/self__b__stream.json
 src/busbar_oracle/fleet_fixtures/lib.sh
 src/busbar_oracle/fleet_fixtures/verdict.sh
+tests/test_capture_ws.py
+tests/test_diff_cells_derived.py
+tests/test_diff_cells_ws.py
+tests/test_mock_upstream_ws.py
+tests/test_normalize_ws.py
+tests/test_wsframe.py

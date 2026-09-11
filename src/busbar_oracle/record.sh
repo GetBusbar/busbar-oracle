@@ -686,13 +686,55 @@ except Exception: sys.exit(1)' "$f" || { pending=1; break; }
     sleep 0.1
   done
 }
+# ── THE PROBE AND THE SNAPSHOT MUST SEE THE SAME METRIC SET ─────────────────────────────────────
+# The loop below polls until two consecutive reads agree and THEN calls snapshot(). For that to mean
+# anything the two must be reads of the SAME thing, and they were not: the probe digested /metrics
+# through a blanket `grep -v '_seconds'`, which hides every duration summary AND its sample count,
+# while snapshot() scrapes the whole exposition a fraction of a second later. busbar observes a
+# request's duration AFTER it has answered the client, so whether that observation had landed by the
+# time the `after` snapshot was taken was a race nothing was watching: the metrics delta carried
+# `busbar_request_duration_seconds_sum` on some runs and not on others, and `metrics.timing` — the
+# norm rule that DROPS that key — fired or did not with it. Measured on
+# `billing|key-usage|after-upstream-down`: a 5/5 coin flip on the recorded `applied` set across ten
+# runs on two boxes. The bytes were right either way; the rule set was a stopwatch reading.
+#
+# WHAT THE PROBE MAY WATCH, AND WHY IT IS NOT SIMPLY "EVERYTHING".
+#   * `_seconds_count` / `_seconds_bucket` — a summary's or histogram's SAMPLE COUNT. It moves when,
+#     and only when, busbar observes a request. That is precisely the event the `after` snapshot must
+#     not run ahead of, so it IS the fixed point.
+#   * `quantile="..."` samples — a summary re-derives these from a sliding window, so they move on
+#     their own with the clock. In the fixed point they would make it unreachable; and they are
+#     dropped by normalize.py's `metrics.timing` anyway, so they decide no recorded byte.
+#   * `busbar_uptime_seconds`, `process_cpu_seconds_total`, and anything else whose name carries
+#     `_seconds` without being a count or a bucket — wall-clock gauges. Same argument, more sharply:
+#     a fixed point containing a value that changes every tick can never be reached, and the loop
+#     would spin out its bound on every single cell. This is why the old line reached for the blunt
+#     filter, and why the fix is a rule rather than the removal of one.
+#   * everything without `_seconds` in it — unchanged: counters, gauges, the whole rest of the body.
+#
+# WHY HERE AND NOT IN normalize.py. The same flip could be closed by mapping timing summaries to a
+# shape that cannot flip in the normalizer. That would change what normalize.py WRITES, and every
+# cell of the committed golden was written by the current normalizer — so the fix would only take
+# effect by moving the bytes (or the `applied` sets) of cells that were recorded correctly, and the
+# golden's own replay against itself would stop being clean. A settle probe decides only WHEN the
+# snapshot is taken. No recorded byte anywhere moves, which is the only way this defect can be closed
+# without reopening 928 cells that are not about it.
+_settle_metrics_view() {  # stdin: a /metrics exposition -> stdout: the settle loop's view of it
+  awk '
+    /^#/                                       { next }
+    /quantile=/                                { next }
+    /_seconds_count([{ ]|$)|_seconds_bucket\{/ { print; next }
+    /_seconds/                                 { next }
+                                               { print }
+  ' | LC_ALL=C sort
+}
 settle_then_snapshot() {  # <dir> <key-id>
   local d="$1" kid="$2" i=0 prev="" cur=""
   # the `before` snapshot opens a cell: clear the previous cell's verdict here, so SNAPSHOT_FAIL is
   # always a statement about THIS cell (both snapshots of it) and never a leak from the last one
   case "${d##*/}" in before) SNAPSHOT_FAIL="" ;; esac
   while [ $i -lt 20 ]; do
-    cur="$(curl -fsS -m 5 -H "Authorization: Bearer ${ORACLE_ADMIN_TOKEN}" "http://127.0.0.1:${ADMIN_PORT}/api/v1/admin/keys/${kid}/usage" 2>/dev/null | jq -c 'del(.as_of)' 2>/dev/null)$(curl -fsS -m 5 -H "Authorization: Bearer ${ORACLE_TOKEN_OK}" "http://127.0.0.1:${LISTEN_PORT}/metrics" 2>/dev/null | grep -v '^#' | grep -v '_seconds' | sort | _digest)"
+    cur="$(curl -fsS -m 5 -H "Authorization: Bearer ${ORACLE_ADMIN_TOKEN}" "http://127.0.0.1:${ADMIN_PORT}/api/v1/admin/keys/${kid}/usage" 2>/dev/null | jq -c 'del(.as_of)' 2>/dev/null)$(curl -fsS -m 5 -H "Authorization: Bearer ${ORACLE_TOKEN_OK}" "http://127.0.0.1:${LISTEN_PORT}/metrics" 2>/dev/null | _settle_metrics_view | _digest)"
     [ -n "$prev" ] && [ "$cur" = "$prev" ] && [ $i -ge 2 ] && break
     prev="$cur"; sleep 0.15; i=$((i+1))
   done

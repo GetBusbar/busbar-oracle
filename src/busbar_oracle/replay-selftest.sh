@@ -3212,6 +3212,98 @@ for c in P20 P29 P30; do
     "a transform alone is not credited when the rewritten pair still differs"
 done
 
+# (pp) THE SETTLE PROBE AND THE SNAPSHOT MUST SEE THE SAME METRIC SET.
+#
+# settle_then_snapshot() polls until two consecutive reads agree and THEN calls snapshot(). The two
+# reads were not of the same thing: the probe digested `/metrics` through `grep -v '_seconds'`, so
+# every duration summary — `busbar_request_duration_seconds` and its `_count` — was invisible to the
+# fixed point, while snapshot() scraped the WHOLE exposition a fraction of a second later. busbar
+# observes a request's duration after it has answered the client, so whether that observation had
+# landed by the time the `after` snapshot was taken was a race the loop was not watching: the delta
+# carried the summary's `_sum` on some runs and not on others, and `metrics.timing` (which drops that
+# key) therefore fired or did not. Measured on `billing|key-usage|after-upstream-down`: a 5/5 coin
+# flip on the recorded `applied` set across ten runs on two boxes. A cell whose rule set depends on
+# which way a stopwatch fell is not a recording of busbar.
+#
+# THE FIX IS IN THE RECORDER, NOT THE NORMALIZER, and that choice is the point. Mapping timing
+# summaries to a flip-proof shape in normalize.py would change what normalize.py writes — and every
+# one of the 928 cells in the committed golden was written by the CURRENT normalizer, so a
+# re-normalization would have to move their bytes (or their `applied` sets) to take effect at all.
+# A recorder-side settle probe changes no recorded byte anywhere: it only decides WHEN the snapshot
+# is taken. The golden replays identically before and after, which is the only way this defect can
+# be fixed without reopening every cell that was recorded correctly.
+#
+# WHAT THE PROBE MAY WATCH. Not everything with `_seconds` in it: `busbar_uptime_seconds` and
+# `process_cpu_seconds_total` move with the WALL CLOCK, and a fixed point that includes them can
+# never be reached — the loop would spin out its bound on every cell. Nor the quantiles, which a
+# summary re-derives from a sliding window and which therefore also move on their own. What moves
+# only when a request is OBSERVED is the summary's SAMPLE COUNT (`_seconds_count`, and a histogram's
+# `_seconds_bucket`), and that is exactly what the probe settles on.
+#
+# Drives the REAL _settle_metrics_view() out of record.sh, extracted by name, so a change to the
+# rule changes this case with it.
+eval "$(sed -n '/^_settle_metrics_view()/,/^}/p' "${here}/record.sh")"
+if ! declare -F _settle_metrics_view >/dev/null 2>&1; then
+  say FAIL "record.sh defines no _settle_metrics_view(): the settle probe's metric view is not a rule anything can drive"
+else
+pp_expo() {  # <count> <quantile> <uptime> <cpu>
+  cat <<EOF
+# HELP busbar_requests_total requests
+# TYPE busbar_requests_total counter
+busbar_requests_total{pool="p"} 3
+busbar_request_duration_seconds{pool="p",quantile="0.5"} $2
+busbar_request_duration_seconds{pool="p",quantile="0.99"} $2
+busbar_request_duration_seconds_sum{pool="p"} 0.9
+busbar_request_duration_seconds_count{pool="p"} $1
+busbar_upstream_latency_seconds_bucket{le="0.1"} $1
+busbar_uptime_seconds $3
+process_cpu_seconds_total $4
+EOF
+}
+pp_view() { pp_expo "$1" "$2" "$3" "$4" | _settle_metrics_view; }
+
+# (pp1) the sample count is IN the view — the half the old probe could not see at all
+if pp_view 3 0.011 41 1.25 | grep -q '^busbar_request_duration_seconds_count{pool="p"} 3$'; then
+  say PASS "settle probe: a duration summary's SAMPLE COUNT is part of the fixed point"
+else
+  say FAIL "settle probe: the duration summary's _count is filtered out, so the probe settles before busbar has observed the request the snapshot is about"
+fi
+
+# (pp2) …and so is a histogram's bucket, for the same reason
+pp_view 3 0.011 41 1.25 | grep -q 'busbar_upstream_latency_seconds_bucket' \
+  && say PASS "settle probe: a latency histogram's bucket count is part of the fixed point" \
+  || say FAIL "settle probe: a _seconds_bucket sample is filtered out of the fixed point"
+
+# (pp3) A FIXED POINT THAT CAN ACTUALLY BE REACHED. Only the clock moved: the view must not.
+if [ "$(pp_view 3 0.011 41 1.25)" = "$(pp_view 3 0.038 55 9.75)" ]; then
+  say PASS "settle probe: quantiles, uptime and cpu seconds move with the clock and do NOT move the view (the loop can still settle)"
+else
+  say FAIL "settle probe: a clock-driven sample is in the view, so the fixed point can never be reached and every cell spins out its bound"
+fi
+
+# (pp4) …and the thing it exists to watch DOES move it
+if [ "$(pp_view 3 0.011 41 1.25)" = "$(pp_view 4 0.011 41 1.25)" ]; then
+  say FAIL "settle probe: one more observed request does not change the view, so the probe cannot wait for it"
+else
+  say PASS "settle probe: one more observed request DOES change the view, so the probe waits for it"
+fi
+
+# (pp5) a comment line is never part of a digest's input
+pp_view 3 0.011 41 1.25 | grep -q '^#' \
+  && say FAIL "settle probe: HELP/TYPE comment lines are in the view" \
+  || say PASS "settle probe: HELP/TYPE comment lines are out of the view"
+
+# (pp6) …and the call site must USE it: a blanket `grep -v '_seconds'` in the settle loop is the
+# defect itself, whatever the function beside it says.
+pp_src="$(sed -n '/^settle_then_snapshot()/,/^}/p' "${here}/record.sh")"
+pp_bad=""
+grep -q '_settle_metrics_view' <<<"$pp_src" || pp_bad="${pp_bad} the settle loop does not go through _settle_metrics_view;"
+grep -q "grep -v '_seconds'" <<<"$pp_src" && pp_bad="${pp_bad} the settle loop still filters the whole exposition through grep -v '_seconds';"
+[ -z "$pp_bad" ] \
+  && say PASS "settle_then_snapshot digests /metrics through the one view rule" \
+  || say FAIL "record.sh's settle loop:${pp_bad}"
+fi
+
 echo
 [ "$skips" -eq 0 ] || printf 'replay selftest: %s case(s) SKIPPED — not proven by this run:%s\n\n' "$skips" "$skipped"
 [ "$fails" -eq 0 ] && echo "replay selftest: GREEN${skips:+ (with $skips skipped)}" || { echo "replay selftest: RED ($fails)"; exit 1; }
