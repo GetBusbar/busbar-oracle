@@ -1199,6 +1199,50 @@ else
   say FAIL "VV-5c the pointer seam is not RFC 6901 in both directions: $(tail -3 "$W/ptr-roundtrip.log" | tr '\n' ' ')"
 fi
 
+# (vv5d) THE REPORTER, NOT JUST THE BUILDER AND THE RESOLVER (OR-BASE-1, 0.3.20). vv5/vv5b/vv5c prove
+# `additive_superset` and `resolve_json_pointer` agree on RFC 6901 — but `json_paths_diff`, the
+# walker that names the FIRST divergent leaf of a JSON body or an `effects.*` value for the ledger's
+# own diff text (`body /paths/.../summary: "old" -> "new"`), was not part of the 0.3.10 fix: it still
+# joined a raw key onto `path`, so the exact row a maintainer would copy into
+# `description_corrections` named a pointer `resolve_json_pointer` could not resolve — the same
+# failure, one door later. Proved directly: `json_paths_diff` on a document with a slash-bearing key
+# emits the ESCAPED pointer, and `resolve_json_pointer` reaches the SAME leaf with nothing passed
+# between them but the pointer text itself — the property that makes a reported leaf pasteable.
+# `_pointer_set` (the `derived_from_body` reader of `json_paths_diff`'s own output) is proved too,
+# since it must unescape to keep reading what the reporter now escapes.
+if python3 - <<PYPTR2 >"$W/ptr-reporter.log" 2>&1
+import importlib.util
+spec = importlib.util.spec_from_file_location("dc", "${here}/diff-cells.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+url = "/v1/overlay/{section}"
+golden = {"paths": {url: {"summary": "old"}}}
+candidate = {"paths": {url: {"summary": "new"}}}
+diffs = m.json_paths_diff(golden, candidate)
+assert len(diffs) == 1, diffs
+reported = diffs[0]["path"]
+assert reported == "/paths/~1v1~1overlay~1{section}/summary", reported
+found, val = m.resolve_json_pointer(golden, reported)
+assert found and val == "old", f"the reporter named a pointer the resolver could not reach: {found} {val!r}"
+found, val = m.resolve_json_pointer(candidate, reported)
+assert found and val == "new", f"the reporter named a pointer the resolver could not reach: {found} {val!r}"
+
+# _pointer_set (derived_from_body's own reader of json_paths_diff's output) unescapes to match
+patched = {url: {"body_bytes": 622}}
+assert m._pointer_set(patched, f"/{m.ptr_escape(url)}/body_bytes", 482) is True
+assert patched == {url: {"body_bytes": 482}}
+
+# and a plain key -- every key this walker has ever been handed outside an OpenAPI document -- still
+# escapes to itself, so no path this file has ever printed for such a document moved a byte
+assert m.json_paths_diff({"a": {"b": 1}}, {"a": {"b": 2}}) == [{"path": "/a/b", "golden": 1, "candidate": 2}]
+print("ok")
+PYPTR2
+then
+  say PASS "the diff's first-divergent-leaf reporter (json_paths_diff) also emits RFC 6901-escaped pointers, pasteable straight into accepted-differences ($(cat "$W/ptr-reporter.log"))"
+else
+  say FAIL "VV-5d json_paths_diff/_pointer_set are not RFC 6901-escaped: $(tail -5 "$W/ptr-reporter.log" | tr '\n' ' ')"
+fi
+
 # (tt) `description_corrections` — A NAMED LEAF MAY DIFFER OUTRIGHT, NO GROWTH PROOF NEEDED, BECAUSE
 # THE REGISTER SAYS SO EXPLICITLY. Unlike `text_list_growth` (which proves growth mechanically),
 # this is a declared factual correction to 1.5.5's prose: the entry names the exact JSON pointer,

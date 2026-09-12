@@ -824,19 +824,31 @@ def load_cell(d: str, cell_id: str):
 
 
 def json_paths_diff(a, b, path="", out=None, limit=50):
-    """List JSON-pointer paths where a != b (first `limit`)."""
+    """List JSON-pointer paths where a != b (first `limit`), in the SAME RFC 6901-escaped convention
+    `additive_superset` builds (0.3.20): a dict key is joined in with `ptr_escape` (0.3.10), not
+    raw, so a key that itself contains `/` — an OpenAPI `paths` key, which is a URL — cannot forge a
+    path separator here either. Before this, this was the one path-builder in the file the 0.3.10
+    fix missed: `additive_superset`/`resolve_json_pointer` already agreed on the standard, but this
+    walker (the one that names a body's or an `effects.*` value's FIRST divergent leaf for the
+    ledger) still joined with the raw key, so the row it printed for exactly the document the fix
+    was about — `/paths//api/v1/admin/overlay/{section}/delete/summary` — could not be pasted into
+    `description_corrections` and resolved: `resolve_json_pointer` would split it back into
+    (`paths`, ``, `api`, ...) that name nothing, same failure, different door. A key with neither
+    `/` nor `~` escapes to itself, so every path this has ever printed for every other document is
+    unchanged."""
     if out is None:
         out = []
     if len(out) >= limit:
         return out
     if isinstance(a, dict) and isinstance(b, dict):
         for k in sorted(set(a) | set(b)):
+            kp = f"{path}/{ptr_escape(k)}"
             if k not in a:
-                out.append({"path": f"{path}/{k}", "golden": None, "candidate": b[k]})
+                out.append({"path": kp, "golden": None, "candidate": b[k]})
             elif k not in b:
-                out.append({"path": f"{path}/{k}", "golden": a[k], "candidate": None})
+                out.append({"path": kp, "golden": a[k], "candidate": None})
             else:
-                json_paths_diff(a[k], b[k], f"{path}/{k}", out, limit)
+                json_paths_diff(a[k], b[k], kp, out, limit)
             if len(out) >= limit:
                 break
         return out
@@ -927,9 +939,12 @@ def body_text_bytes(cell) -> bytes | None:
 
 
 def _pointer_set(doc, path: str, value) -> bool:
-    """Put `value` at `path` in `doc` (json_paths_diff's own path convention). False if it does not
-    resolve — a path that does not address a leaf can never be credited as a derived one."""
-    parts = [p for p in path.split("/")[1:]]
+    """Put `value` at `path` in `doc` (json_paths_diff's own path convention, RFC 6901-escaped since
+    0.3.20 — see json_paths_diff). False if it does not resolve — a path that does not address a
+    leaf can never be credited as a derived one. Each reference token is unescaped (`~1`->`/` then
+    `~0`->`~`) before it addresses a key, the same order `resolve_json_pointer` uses, so a `paths`
+    key that is itself a URL is still reachable here rather than being split on its own slash."""
+    parts = [ptr_unescape(p) for p in path.split("/")[1:]]
     if not parts:
         return False
     node = doc
