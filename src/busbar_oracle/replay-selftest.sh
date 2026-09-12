@@ -3957,6 +3957,22 @@ def walk(x):
     if isinstance(x, str):
         return n.norm_scalar_str(x, set())
     return x
+def walk_cell(doc):
+    # `effects.egress` is deliberately NOT run through the generic string walk in production --
+    # normalize() pulls it out and hands it to norm_egress, which keeps `path`, `body` and every
+    # header but `host` byte-exact on purpose (the seam that must catch a dropped/mangled egress
+    # request, not hide one). A blind walk here would strip a loopback port normalize() never
+    # touches and report a committed byte moving that never would -- the rule re-opening a field
+    # it was told by name never to enter, and the proof reporting that as if it were the rule
+    # itself widening. So this proof takes the same split normalize() does, not its own copy.
+    effects = doc.get("effects")
+    if isinstance(effects, dict) and "egress" in effects:
+        effects = dict(effects)
+        egress = effects.pop("egress")
+        rest = walk({**doc, "effects": effects})
+        rest["effects"]["egress"] = n.norm_egress(egress, set())
+        return rest
+    return walk(doc)
 moved, total = [], 0
 for root, _d, files in os.walk(sys.argv[1]):
     if os.path.basename(root) != "cells":
@@ -3964,7 +3980,7 @@ for root, _d, files in os.walk(sys.argv[1]):
     for f in files:
         total += 1
         doc = json.load(open(os.path.join(root, f)))
-        if walk(doc) != doc:
+        if walk_cell(doc) != doc:
             moved.append(f)
 print(f"{total}\t{len(moved)}\t{' '.join(moved[:3])}")
 EOF
@@ -3977,6 +3993,87 @@ EOF
   fi
 else
   skip "text.port vs the committed golden: \$BUSBAR_ORACLE_DATA names no golden/ to re-apply the rule over"
+fi
+
+# (vv2) REGRESSION: an `effects.egress` entry is allowed to carry a raw loopback port in `path` or
+# `body` -- norm_egress leaves both byte-exact on purpose (see its docstring) -- and the proof above
+# must not re-open that field itself. Built fresh here so it runs with or without a real corpus, and
+# red-before-green: this cell is exactly the shape that made the proof above FAIL before it learned
+# the same egress split normalize() itself uses.
+ww_golden="$W/vv2-golden/fixture-host/cells"
+mkdir -p "$ww_golden"
+cat >"$ww_golden/egress-port.json" <<'CELLEOF'
+{
+  "status": 200,
+  "headers": {},
+  "body": "{\"ok\":true}",
+  "effects": {
+    "egress": [
+      {
+        "path": "/callback?target=http://127.0.0.1:54501/hook",
+        "method": "GET",
+        "headers": {"host": "127.0.0.1:<PORT>"},
+        "response": {"status": 200}
+      }
+    ]
+  }
+}
+CELLEOF
+ww_res="$(python3 - "$W/vv2-golden" "${here}/normalize.py" <<'EOF'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("ww_n", sys.argv[2])
+n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
+def walk(x):
+    if isinstance(x, dict):
+        return {walk(k): walk(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [walk(i) for i in x]
+    if isinstance(x, str):
+        return n.norm_scalar_str(x, set())
+    return x
+def walk_cell(doc):
+    effects = doc.get("effects")
+    if isinstance(effects, dict) and "egress" in effects:
+        effects = dict(effects)
+        egress = effects.pop("egress")
+        rest = walk({**doc, "effects": effects})
+        rest["effects"]["egress"] = n.norm_egress(egress, set())
+        return rest
+    return walk(doc)
+doc = json.load(open(os.path.join(sys.argv[1], "fixture-host", "cells", "egress-port.json")))
+print("moved" if walk_cell(doc) != doc else "unmoved")
+EOF
+)"
+if [ "$ww_res" = "unmoved" ]; then
+  say PASS "text.port: an egress path/body's own raw loopback port stays byte-exact -- norm_egress's contract, not this proof's to widen"
+else
+  say FAIL "text.port: the committed-byte proof re-opened effects.egress and moved a byte norm_egress promises never to touch"
+fi
+# …and the proof still catches a REAL leak: an un-normalized port sitting in the ordinary body
+# (never egress) must still be reported, or the proof above would be vacuous rather than fixed.
+ww_leaky="$W/vv2-leak/fixture-host/cells"
+mkdir -p "$ww_leaky"
+printf '{"status":200,"headers":{},"body":"{\\"listen\\":\\"http://127.0.0.1:54501/\\"}","effects":{}}' >"$ww_leaky/leak.json"
+ww_res2="$(python3 - "$W/vv2-leak" "${here}/normalize.py" <<'EOF'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("ww_n2", sys.argv[2])
+n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
+def walk(x):
+    if isinstance(x, dict):
+        return {walk(k): walk(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [walk(i) for i in x]
+    if isinstance(x, str):
+        return n.norm_scalar_str(x, set())
+    return x
+doc = json.load(open(os.path.join(sys.argv[1], "fixture-host", "cells", "leak.json")))
+print("moved" if walk(doc) != doc else "unmoved")
+EOF
+)"
+if [ "$ww_res2" = "moved" ]; then
+  say PASS "text.port: an un-normalized port OUTSIDE effects.egress is still caught -- the egress exemption is scoped to egress alone"
+else
+  say FAIL "text.port: the committed-byte proof stopped catching a real un-normalized port"
 fi
 
 # (xx) THE THREE SCOPED NORM RULES: EACH FIRES FOR THE CELLS IT NAMES, AND FOR NO OTHERS.
