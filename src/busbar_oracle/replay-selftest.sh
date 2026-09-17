@@ -2548,8 +2548,13 @@ cls="$(classes_of 'self|a|ok' "$W/out-hh")"
 # for a reason that is not busbar. This case reads the marker list out of the RUST SOURCE and holds
 # record.sh to it, so a third marker added to SUPERVISOR_MARKERS tomorrow is red here rather than
 # silently re-opening the hole.
-src="${repo}/crates/busbar-core/src/admin/restart.rs"
-if [ -f "$src" ]; then
+# restart.rs moved crates in busbar 1.6.0 (busbar-core/src/admin -> busbar-admin/src). Take the new
+# home first, then the old, then any restart.rs in the tree that actually names SUPERVISOR_MARKERS —
+# so this case follows the file across the collapse instead of skipping when the path goes stale.
+src="${repo}/crates/busbar-admin/src/restart.rs"
+[ -f "$src" ] || src="${repo}/crates/busbar-core/src/admin/restart.rs"
+[ -f "$src" ] || src="$(grep -rlE 'SUPERVISOR_MARKERS' "${repo}" --include='restart.rs' 2>/dev/null | LC_ALL=C sort | head -n1)"
+if [ -n "$src" ] && [ -f "$src" ]; then
   want="$(grep -oE 'SUPERVISOR_MARKERS[^=]*= *\[[^]]*\]' "$src" | grep -oE '"[A-Z_]+"' | tr -d '"' | LC_ALL=C sort -u)"
   got="$(grep -oE '^unset [A-Z_ ]+' "${here}/record.sh" | sed 's/^unset //' | tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort -u)"
   missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))"
