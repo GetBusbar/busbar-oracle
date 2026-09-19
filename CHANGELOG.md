@@ -4,6 +4,32 @@ Released by tag. A consumer pins `tag@sha256` and folds it into its harness revi
 so every entry here is a harness change by definition — a recording made before it and
 one made after it are not comparable without saying so out loud.
 
+## 0.3.23
+
+busbar 1.6.0's config-model Stage 3 makes `deny_unknown_fields` refuse a top-level `models:`
+block — it must live under the reserved `pools.models:` sibling instead. `oracle-config.sh`
+still emits the canonical 1.5.5 shape (top-level `models:`, unchanged — 1.5.5 still requires
+it there), so a 1.6.0+ candidate could not boot the shared probe config at all: every cell in
+every plane failed setup, not only the two config-readback cells the move actually touches.
+
+- **Migrate-on-candidate-boot.** `record.sh` and `selftest.sh` now try the raw generated
+  config against the binary under test first, exactly as before. Only a binary that REFUSES
+  it is handed a second try: its own `--migrate-config`, run against `$WORK/config.yaml` IN
+  PLACE (same path, so nothing downstream that names the file sees a different one), and the
+  boot is retried against the migrated document. A binary that accepts the raw config — the
+  1.5.5 golden, or any pre-Stage-3 build — never reaches the migrate branch at all, so its
+  config is provably byte-identical to what `oracle-config.sh` wrote. A binary that refuses
+  the raw config AND has no `--migrate-config` (or whose migrate itself fails) is left with
+  the raw config and fails its boot exactly as it did before this release, with the original
+  refusal on record — this is a fallback, never a silent rewrite of a config that already
+  worked.
+
+  `record.sh`: every `oracle_write_config` call site (the initial boot, the hooks-variant
+  probe, `ensure_baseline_config`, and `boot_busbar`'s per-variant rewrite) now goes through
+  a new `oracle_write_config_for_bin` wrapper that does exactly this. `selftest.sh`'s own
+  `--validate` smoke check gets the same one-retry treatment inline, so a candidate binary
+  passed to `busbar-oracle selftest` is not reported as a false validate failure.
+
 ## 0.3.18
 
 The op axis (0.3.17) gave the mock a CALL and six non-chat leaves, but one money term on the

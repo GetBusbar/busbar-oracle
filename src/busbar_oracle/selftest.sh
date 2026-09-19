@@ -66,8 +66,20 @@ for bin in "$@"; do
   if oracle_env "$BUSBAR_BIN" --validate >"${WORK}/validate.log" 2>&1; then
     echo "PASS  validate: ${ver}"
   else
-    echo "FAIL  validate: ${ver}"; sed 's/^/        /' "${WORK}/validate.log" | tail -8; fails=$((fails+1))
-    continue
+    # CONFIG-1.6.0.md ruling §7 (migrate-on-candidate-boot): the raw config is canonical 1.5.5-shape
+    # (top-level `models:`) and stays that way — a 1.6.0+ candidate that refuses it for exactly that
+    # reason gets ONE retry, migrated in place via its own `--migrate-config`, before this is called
+    # a real failure. A binary that accepts the raw config (the golden) never reaches this branch.
+    migrated="$("$bin" --migrate-config "${WORK}/config.yaml" 2>"${WORK}/migrate-config.log")"
+    if [ -n "$migrated" ]; then
+      printf '%s\n' "$migrated" >"${WORK}/config.yaml"
+    fi
+    if [ -n "$migrated" ] && oracle_env "$BUSBAR_BIN" --validate >"${WORK}/validate.log" 2>&1; then
+      echo "PASS  validate: ${ver} (via --migrate-config)"
+    else
+      echo "FAIL  validate: ${ver}"; sed 's/^/        /' "${WORK}/validate.log" | tail -8; fails=$((fails+1))
+      continue
+    fi
   fi
 
   # ONE CELL, END TO END. Ports are offset per binary so two binaries in one invocation cannot

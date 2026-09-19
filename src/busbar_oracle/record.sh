@@ -203,6 +203,27 @@ CONTROL="$WORK/mock.control"
 
 fail_setup() { record "setup" FAIL "$1" "${2:-}"; exit 1; }
 
+# CONFIG-1.6.0.md ruling §7 (migrate-on-candidate-boot): 1.6.0 config-model Stage 3 denies a
+# top-level `models:` (`deny_unknown_fields`) — busbar 1.6.0 now requires it nested under the
+# reserved `pools.models:` sibling. oracle-config.sh stays canonical 1.5.5-shape UNCHANGED (it emits
+# top-level `models:`, still what 1.5.5 requires), so a 1.6.0 CANDIDATE cannot boot the raw shared
+# config at all. The GOLDEN (1.5.5, or any binary that still accepts the raw shape) must never be
+# touched: --validate against the untouched bytes succeeds immediately and this returns without
+# going near --migrate-config. Only a binary that refuses the raw config — because it is a candidate
+# built against Stage 3 — reaches the migrate branch, and only then is "$WORK/config.yaml" rewritten,
+# IN PLACE (same path, so nothing downstream that names it sees a different one). A candidate too old
+# to have --migrate-config (or whose migrate itself fails) is left with the raw config untouched and
+# fails its boot exactly as before, with the original refusal on record.
+oracle_write_config_for_bin() {  # <work> <listen_port> <admin_port> <mock_port> — wraps oracle_write_config
+  oracle_write_config "$@" || return $?
+  local work="$1"
+  oracle_env "$BIN" --validate >/dev/null 2>"${work}/.oracle-config-precheck.log" && return 0
+  local migrated
+  migrated="$("$BIN" --migrate-config "${work}/config.yaml" 2>"${work}/.oracle-migrate-config.log")" || return 0
+  [ -n "$migrated" ] || return 0
+  printf '%s\n' "$migrated" >"${work}/config.yaml"
+}
+
 # THE OUTAGE VERB IS PER-CELL STATE, AND PUTTING IT BACK WAS THE ONE CONTROL WRITE NOBODY CHECKED.
 # Setting the verb is asserted (`oracle_write_control … || record FAIL`), because a cell served a
 # healthy upstream is not the cell that was asked for. Clearing it was `|| true` — and the mock's own
@@ -234,7 +255,7 @@ clear_control_or_die() {  # <cell-id> — returns non-zero after recording the F
 # applied to the wrong baseline is a different cell). Called before any such cell reads the file.
 ensure_baseline_config() {
   [ -n "${DISK_VARIANT:-}" ] || return 0
-  ORACLE_VARIANT="" oracle_write_config "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || return 1
+  ORACLE_VARIANT="" oracle_write_config_for_bin "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || return 1
   DISK_VARIANT=""
 }
 
@@ -305,15 +326,15 @@ assert_port_is_ours "$MOCK_PORT" "$MOCK_PID" \
                 "expected pid ${MOCK_PID}, port owned by '$(port_owner_pid "$MOCK_PORT")'; its control file (${CONTROL}) would be ignored"
 
 # ── busbar under the oracle config ──────────────────────────────────────────────────────────────
-oracle_write_config "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || fail_setup "oracle config could not be written"
+oracle_write_config_for_bin "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || fail_setup "oracle config could not be written"
 oracle_env "$BIN" --validate >"$WORK/validate.log" 2>&1 || fail_setup "busbar rejected the oracle config (run selftest.sh)" "$(tail -c 400 "$WORK/validate.log")"
 # The hooks variant loads the published first-party plugins, which a candidate can only verify with
 # the release public key embedded at build time (BUSBAR_RELEASE_PUBKEY). A binary built without it
 # refuses every hooks-variant boot, so that is judged ONCE here instead of as 29 failed cells.
-if ORACLE_VARIANT=hooks oracle_write_config "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" 2>/dev/null; then
+if ORACLE_VARIANT=hooks oracle_write_config_for_bin "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" 2>/dev/null; then
   oracle_env "$BIN" --validate >"$WORK/validate-hooks.log" 2>&1 \
     || fail_setup "busbar rejected the hooks-variant config: a candidate must be built with BUSBAR_RELEASE_PUBKEY exported (see plugin-sign)" "$(tail -c 400 "$WORK/validate-hooks.log")"
-  oracle_write_config "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || fail_setup "oracle config could not be written"
+  oracle_write_config_for_bin "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || fail_setup "oracle config could not be written"
 fi
 
 # DISK_VARIANT is the variant the config FILE currently on disk was written for — a property of
@@ -323,7 +344,7 @@ BUSBAR_PID="" DISK_VARIANT=""
 boot_busbar() {  # [variant] start busbar, wait for /healthz, mint the three keys, prime the BROKE key
   local variant="${1:-}"
   if [ "$variant" != "$DISK_VARIANT" ]; then
-    ORACLE_VARIANT="$variant" oracle_write_config "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || return 3
+    ORACLE_VARIANT="$variant" oracle_write_config_for_bin "$WORK" "$LISTEN_PORT" "$ADMIN_PORT" "$MOCK_PORT" || return 3
     DISK_VARIANT="$variant"
   fi
   # PROVE THE PORTS FREE IMMEDIATELY BEFORE THE SPAWN. Without this the /healthz poll below adopts
